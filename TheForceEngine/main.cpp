@@ -504,12 +504,17 @@ int main(int argc, char* argv[])
 	TFE_CrashHandler::setThreadExceptionHandlers();
 	#endif
 
+	// TFE Debug: early log to a known location.
+	FILE* dbgLog = fopen("E:/Github/TheForceEngine/x64/Release/tfe_debug.log", "w");
+	if (dbgLog) { fprintf(dbgLog, "TFE started\n"); fflush(dbgLog); }
+
 	// Paths
 	bool pathsSet = true;
 	pathsSet &= TFE_Paths::setProgramPath();
 	pathsSet &= TFE_Paths::setProgramDataPath("TheForceEngine");
 	pathsSet &= TFE_Paths::setUserDocumentsPath("TheForceEngine");
 	TFE_System::openRotatingLog("the_force_engine_log.txt");
+	if (dbgLog) { fprintf(dbgLog, "Paths set: %d, log opened\n", pathsSet); fflush(dbgLog); }
 	TFE_System::logWrite(LOG_MSG, "Main", "The Force Engine %s", c_gitVersion);
 	if (!pathsSet)
 	{

@@ -839,4 +839,48 @@ namespace TFE_Sprite_Jedi
 		}
 		return s_frameList[pool][index];
 	}
+
+	bool getWaxName(JediWax* wax, const char** name, AssetPool* pool)
+	{
+		if (!wax || !name)
+		{
+			return false;
+		}
+
+		s32 index = -1;
+		AssetPool foundPool = POOL_LEVEL;
+		if (getWaxIndex(wax, &index, &foundPool))
+		{
+			if (index >= 0 && index < (s32)s_spriteNames[foundPool].size())
+			{
+				*name = s_spriteNames[foundPool][index].c_str();
+				if (pool) { *pool = foundPool; }
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	bool getFrameName(JediFrame* frame, const char** name, AssetPool* pool)
+	{
+		if (!frame || !name)
+		{
+			return false;
+		}
+
+		s32 index = -1;
+		AssetPool foundPool = POOL_LEVEL;
+		if (getFrameIndex(frame, &index, &foundPool))
+		{
+			if (index >= 0 && index < (s32)s_frameNames[foundPool].size())
+			{
+				*name = s_frameNames[foundPool][index].c_str();
+				if (pool) { *pool = foundPool; }
+				return true;
+			}
+		}
+
+		return false;
+	}
 }

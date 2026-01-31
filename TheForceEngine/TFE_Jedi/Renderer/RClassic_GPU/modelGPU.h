@@ -20,5 +20,22 @@ namespace TFE_Jedi
 	void model_drawListFinish();
 
 	void model_add(void* obj, JediModel* model, Vec3f posWS, fixed16_16* transform, f32 ambient, Vec2f floorOffset, Vec2f ceilOffset, u32 portalInfo);
+	void model_addOverlay(void* obj, JediModel* model, Vec3f posWS, fixed16_16* transform, f32 ambient);
 	void model_drawList();
+	void model_drawOverlayList();
+
 }  // TFE_Jedi
+
+// Voxel debug/tuning variables shared across weapon.cpp, modelGPU.cpp, frontEndUi.cpp.
+namespace TFE_VoxDbg
+{
+	extern bool noCull;
+	extern bool noPortalClip;
+	extern f32  wpnOffX;
+	extern f32  wpnOffY;
+	extern f32  wpnOffZ;
+	extern f32  wpnYawOff;
+	extern f32  wpnPitchScale;
+	extern f32  wpnFwdPitchScale;
+	extern f32  wpnRollScale;
+}

@@ -19,6 +19,7 @@
 #include <TFE_RenderBackend/indexBuffer.h>
 #include <TFE_RenderBackend/shader.h>
 #include <TFE_RenderBackend/shaderBuffer.h>
+#include <TFE_RenderBackend/Win32OpenGL/gl.h>
 
 #include <TFE_Settings/settings.h>
 
@@ -121,6 +122,7 @@ namespace TFE_Jedi
 	};
 	static ShaderInputsMGPU s_shaderInputs[MGPU_SHADER_COUNT];
 	static std::vector<ModelDraw> s_modelDrawList[MGPU_SHADER_COUNT];
+	static std::vector<ModelDraw> s_overlayDrawList[MGPU_SHADER_COUNT];
 
 	extern Mat3  s_cameraMtx;
 	extern Mat4  s_cameraProj;
@@ -635,14 +637,31 @@ namespace TFE_Jedi
 		s_modelVertexBuffer.destroy();
 		s_modelIndexBuffer.destroy();
 
+		static bool s_gpuDiagDone = false;
+		FILE* gpuDiag = nullptr;
+		if (!s_gpuDiagDone)
+		{
+			gpuDiag = fopen("tfe_gpu_model_diag.log", "w");
+			s_gpuDiagDone = true;
+		}
+
 		// For now handle both pools here.
 		for (s32 pool = 0; pool < POOL_COUNT; pool++)
 		{
 			const std::vector<JediModel*>& modelList = TFE_Model_Jedi::getModelList(AssetPool(pool));
 			const size_t modelCount = modelList.size();
 			JediModel*const* model = modelList.data();
+
+			if (gpuDiag) { fprintf(gpuDiag, "pool=%d modelCount=%zu\n", pool, modelCount); }
+
 			for (size_t i = 0; i < modelCount; i++)
 			{
+				if (gpuDiag && model[i]->polygonCount > 100)
+				{
+					fprintf(gpuDiag, "  model[%zu]: polyCount=%d vtxCount=%d flags=0x%x idxStart=%d vtxStart=%d\n",
+						i, model[i]->polygonCount, model[i]->vertexCount, model[i]->flags, indexStart, vertexStart);
+				}
+
 				if (model[i]->flags & MFLAG_DRAW_VERTICES)
 				{
 					if (!buildModelDrawVertices(model[i], &indexStart, &vertexStart))
@@ -728,7 +747,42 @@ namespace TFE_Jedi
 					};
 				}
 				endModel(&ctx);
+
+				if (gpuDiag && model[i]->polygonCount > 100)
+				{
+					ModelGPU* mgpu = (ModelGPU*)model[i]->drawId;
+					if (mgpu)
+					{
+						fprintf(gpuDiag, "    -> GPU: shader=%d indexStart=%d polyCount=%d\n",
+							mgpu->shader, mgpu->indexStart, mgpu->polyCount);
+						// Dump first 3 triangles (9 indices, 9 vertex positions)
+						for (s32 t = 0; t < 3 && t < mgpu->polyCount; t++)
+						{
+							s32 base = mgpu->indexStart + t * 3;
+							u32 i0 = s_indexData[base+0], i1 = s_indexData[base+1], i2 = s_indexData[base+2];
+							fprintf(gpuDiag, "    tri[%d]: idx(%u,%u,%u) pos(%.3f,%.3f,%.3f)(%.3f,%.3f,%.3f)(%.3f,%.3f,%.3f)\n",
+								t, i0, i1, i2,
+								s_vertexData[i0].pos.x, s_vertexData[i0].pos.y, s_vertexData[i0].pos.z,
+								s_vertexData[i1].pos.x, s_vertexData[i1].pos.y, s_vertexData[i1].pos.z,
+								s_vertexData[i2].pos.x, s_vertexData[i2].pos.y, s_vertexData[i2].pos.z);
+							fprintf(gpuDiag, "           nrm(%.3f,%.3f,%.3f) col=(%d,%d,%d,%d)\n",
+								s_vertexData[i0].nrm.x, s_vertexData[i0].nrm.y, s_vertexData[i0].nrm.z,
+								((u8*)&s_vertexData[i0].color)[0], ((u8*)&s_vertexData[i0].color)[1],
+								((u8*)&s_vertexData[i0].color)[2], ((u8*)&s_vertexData[i0].color)[3]);
+						}
+					}
+					else
+					{
+						fprintf(gpuDiag, "    -> GPU: drawId is NULL!\n");
+					}
+				}
 			}
+		}
+
+		if (gpuDiag)
+		{
+			fprintf(gpuDiag, "totalVertices=%zu totalIndices=%zu\n", s_vertexData.size(), s_indexData.size());
+			fclose(gpuDiag);
 		}
 
 		s_modelVertexBuffer.create((u32)s_vertexData.size(), sizeof(ModelVertex), c_modelAttrCount, c_modelAttrMapping, false, s_vertexData.data());
@@ -759,6 +813,26 @@ namespace TFE_Jedi
 		return &s_modelDrawList[shader].back();
 	}
 
+	void model_addOverlay(void* obj, JediModel* model, Vec3f posWS, fixed16_16* transform, f32 ambient)
+	{
+		if (!model || !model->drawId) { return; }
+
+		ModelGPU* modelGPU = (ModelGPU*)model->drawId;
+		s_overlayDrawList[modelGPU->shader].resize(s_overlayDrawList[modelGPU->shader].size() + 1);
+		ModelDraw* drawItem = &s_overlayDrawList[modelGPU->shader].back();
+
+		drawItem->modelId = model->drawId;
+		drawItem->posWS = posWS;
+		drawItem->portalInfo = 0;
+		drawItem->obj = obj;
+		for (s32 i = 0; i < 9; i++)
+		{
+			drawItem->transform[i] = fixed16ToFloat(transform[i]);
+		}
+		drawItem->lightData = { 0.0f, min(ambient, 31.0f) };
+		drawItem->textureOffsets = { 0.0f, 0.0f, 0.0f, 0.0f };
+	}
+
 	void model_add(void* obj, JediModel* model, Vec3f posWS, fixed16_16* transform, f32 ambient, Vec2f floorOffset, Vec2f ceilOffset, u32 portalInfo)
 	{
 		// Make sure the model has been assigned a GPU ID.
@@ -769,7 +843,7 @@ namespace TFE_Jedi
 
 		ModelGPU* modelGPU = (ModelGPU *)model->drawId;
 		ModelDraw* drawItem = getDrawItem(modelGPU->shader);
-		
+
 		drawItem->modelId = model->drawId;
 		drawItem->posWS = posWS;
 		drawItem->portalInfo = portalInfo;
@@ -798,7 +872,12 @@ namespace TFE_Jedi
 	{
 		const TFE_Settings_Graphics* settings = TFE_Settings::getGraphicsSettings();
 
-		// Bind the uber-vertex and index buffers. This holds geometry for *all* 3D models currently loaded.
+		if (TFE_VoxDbg::noCull)
+		{
+			TFE_RenderState::setStateEnable(false, STATE_CULLING);
+			glDisable(GL_CULL_FACE);
+		}
+
 		s_modelVertexBuffer.bind();
 		s_modelIndexBuffer.bind();
 
@@ -808,8 +887,7 @@ namespace TFE_Jedi
 			const size_t listCount = s_modelDrawList[s].size();
 			const ModelDraw* drawList = s_modelDrawList[s].data();
 			if (!listCount) { continue; }
-			
-			// Bind the shader and set per-frame shader variables.
+
 			shader->bind();
 
 			shader->setVariable(s_shaderInputs[s].cameraPosId,   SVT_VEC3,   s_cameraPos.m);
@@ -834,22 +912,22 @@ namespace TFE_Jedi
 			{
 				shader->setVariable(s_shaderInputs[s].textureSettings, SVT_USCALAR, &s_textureSettings);
 			}
-			
-			// Draw items in the current draw list (draw lists are bucketed by shader).
+
 			for (size_t i = 0; i < listCount; i++)
 			{
 				const ModelDraw* drawItem = &drawList[i];
 				const ModelGPU* model = (ModelGPU *)drawItem->modelId;
-				const u32 portalInfo[] = { drawItem->portalInfo, drawItem->portalInfo };
+				const u32 portalInfo[] = {
+					TFE_VoxDbg::noPortalClip ? 0u : drawItem->portalInfo,
+					TFE_VoxDbg::noPortalClip ? 0u : drawItem->portalInfo
+				};
 
-				// Per-draw shader variables.
 				shader->setVariable(s_shaderInputs[s].modelPosId,  SVT_VEC3,   drawItem->posWS.m);
 				shader->setVariable(s_shaderInputs[s].modelMtxId,  SVT_MAT3x3, drawItem->transform);
 				shader->setVariable(s_shaderInputs[s].lightDataId, SVT_VEC2,   drawItem->lightData.m);
 				shader->setVariable(s_shaderInputs[s].textureOffsetId, SVT_VEC4, drawItem->textureOffsets.m);
 				shader->setVariable(s_shaderInputs[s].portalInfo,  SVT_UVEC2,  portalInfo);
 
-				// Draw the geometry (note a single vertex/index buffer is used, so this is just a count and start offset).
 				TFE_RenderBackend::drawIndexedTriangles(model->polyCount, sizeof(u32), model->indexStart);
 
 				if (s_drawnObjCount < MAX_DRAWN_OBJ_STORE)
@@ -859,8 +937,95 @@ namespace TFE_Jedi
 			}
 		}
 
-		// Cleanup
 		s_modelVertexBuffer.unbind();
 		s_modelIndexBuffer.unbind();
+
+		if (TFE_VoxDbg::noCull)
+		{
+			TFE_RenderState::setStateEnable(true, STATE_CULLING);
+		}
+	}
+
+	void model_drawOverlayList()
+	{
+		bool anyOverlay = false;
+		for (s32 s = 0; s < MGPU_SHADER_COUNT; s++)
+		{
+			if (!s_overlayDrawList[s].empty()) { anyOverlay = true; break; }
+		}
+		if (!anyOverlay) { return; }
+
+		// Clear depth buffer so the weapon renders on top of world geometry,
+		// but keep depth testing so the model's own faces sort correctly.
+		glClear(GL_DEPTH_BUFFER_BIT);
+		TFE_RenderState::setStateEnable(true, STATE_DEPTH_WRITE | STATE_DEPTH_TEST);
+		TFE_RenderState::setStateEnable(false, STATE_BLEND);
+		if (TFE_VoxDbg::noCull)
+		{
+			TFE_RenderState::setStateEnable(false, STATE_CULLING);
+			glDisable(GL_CULL_FACE);
+		}
+
+		s_modelVertexBuffer.bind();
+		s_modelIndexBuffer.bind();
+
+		Shader* shader = s_modelShaders;
+		for (s32 s = 0; s < MGPU_SHADER_COUNT; s++, shader++)
+		{
+			const size_t listCount = s_overlayDrawList[s].size();
+			const ModelDraw* drawList = s_overlayDrawList[s].data();
+			if (!listCount) { continue; }
+
+			shader->bind();
+			const TFE_Settings_Graphics* settings = TFE_Settings::getGraphicsSettings();
+			shader->setVariable(s_shaderInputs[s].cameraPosId,   SVT_VEC3,   s_cameraPos.m);
+			shader->setVariable(s_shaderInputs[s].cameraViewId,  SVT_MAT3x3, s_cameraMtx.data);
+			shader->setVariable(s_shaderInputs[s].cameraProjId,  SVT_MAT4x4, s_cameraProj.data);
+			shader->setVariable(s_shaderInputs[s].cameraDirId,   SVT_VEC3,   s_cameraDir.m);
+			shader->setVariable(s_shaderInputs[s].cameraRightId, SVT_VEC3,   s_cameraRight.m);
+			if (s_shaderInputs[s].texSamplingParamId > 0)
+			{
+				const f32 texSamplingParam[] = { settings->useBilinear ? settings->bilinearSharpness : 0.0f, 0.0f, 0.0f, 0.0f };
+				shader->setVariable(s_shaderInputs[s].texSamplingParamId, SVT_VEC4, texSamplingParam);
+			}
+			if (s_shaderInputs[s].palFxLumMask >= 0 && s_shaderInputs[s].palFxFlash >= 0)
+			{
+				Vec3f lumMask, palFx;
+				renderer_getPalFx(&lumMask, &palFx);
+				shader->setVariable(s_shaderInputs[s].palFxLumMask, SVT_VEC3, lumMask.m);
+				shader->setVariable(s_shaderInputs[s].palFxFlash, SVT_VEC3, palFx.m);
+			}
+			if (s_shaderInputs[s].textureSettings >= 0)
+			{
+				shader->setVariable(s_shaderInputs[s].textureSettings, SVT_USCALAR, &s_textureSettings);
+			}
+
+			for (size_t i = 0; i < listCount; i++)
+			{
+				const ModelDraw* drawItem = &drawList[i];
+				const ModelGPU* model = (ModelGPU*)drawItem->modelId;
+				const u32 portalInfo[] = { 0, 0 };
+
+				shader->setVariable(s_shaderInputs[s].modelPosId,  SVT_VEC3,   drawItem->posWS.m);
+				shader->setVariable(s_shaderInputs[s].modelMtxId,  SVT_MAT3x3, drawItem->transform);
+				shader->setVariable(s_shaderInputs[s].lightDataId, SVT_VEC2,   drawItem->lightData.m);
+				shader->setVariable(s_shaderInputs[s].textureOffsetId, SVT_VEC4, drawItem->textureOffsets.m);
+				shader->setVariable(s_shaderInputs[s].portalInfo,  SVT_UVEC2,  portalInfo);
+
+				TFE_RenderBackend::drawIndexedTriangles(model->polyCount, sizeof(u32), model->indexStart);
+			}
+		}
+
+		s_modelVertexBuffer.unbind();
+		s_modelIndexBuffer.unbind();
+
+		// Restore culling.
+		TFE_RenderState::setStateEnable(true, STATE_CULLING);
+
+		// Clear overlay list after drawing.
+		for (s32 i = 0; i < MGPU_SHADER_COUNT; i++)
+		{
+			s_overlayDrawList[i].clear();
+		}
 	}
 }

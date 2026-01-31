@@ -11,6 +11,7 @@
 #include <TFE_Asset/dfKeywords.h>
 #include <TFE_Asset/modelAsset_jedi.h>
 #include <TFE_Asset/spriteAsset_Jedi.h>
+#include <TFE_Asset/voxelAsset.h>
 #include <TFE_Asset/vocAsset.h>
 #include <TFE_DarkForces/sound.h>
 #include <TFE_FileSystem/filestream.h>
@@ -599,6 +600,7 @@ namespace TFE_Jedi
 	{
 		TFE_Sprite_Jedi::freeLevelData();
 		TFE_Model_Jedi::freeLevelData();
+		TFE_Voxel::clearLevelData();
 	}
 
 	JBool level_isGoalComplete(s32 goalIndex)

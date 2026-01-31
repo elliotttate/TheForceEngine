@@ -373,6 +373,12 @@ namespace TFE_DarkForces
 		};
 		task_begin_ctx;
 
+		{
+			static FILE* s_fireDbg = nullptr;
+			if (!s_fireDbg) { s_fireDbg = fopen("E:/Github/TheForceEngine/x64/Release/tfe_fire_debug.log", "w"); }
+			if (s_fireDbg) { fprintf(s_fireDbg, "pistol fire: canFirePrim=%d ammo=%d isShooting=%d\n", s_canFireWeaponPrim, s_curPlayerWeapon->ammo ? *s_curPlayerWeapon->ammo : -1, (int)s_isShooting); fflush(s_fireDbg); }
+		}
+
 		if (*s_curPlayerWeapon->ammo)
 		{
 			task_localBlockBegin;

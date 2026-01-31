@@ -32,6 +32,7 @@ enum ObjectFlags
 	OBJ_FLAG_BOSS            = FLAG_BIT(5),  // Boss enemy.
 	OBJ_FLAG_NO_REMOVE       = FLAG_BIT(6),  // Do not remove when crushed
 	OBJ_FLAG_CAMERA			 = FLAG_BIT(7),  // New in TFE
+	OBJ_FLAG_NO_PORTAL_CLIP  = FLAG_BIT(8),  // Skip portal clipping planes (HUD/overlay objects).
 };
 
 enum EntityTypeFlags
@@ -113,6 +114,7 @@ struct SecObject
 		WaxFrame* fme;
 		void* ptr;
 	};
+	JediModel* voxelModel;	// Optional voxel replacement for sprites/frames.
 	s32 frame;
 	s32 anim;
 	RSector* sector;

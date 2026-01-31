@@ -71,6 +71,8 @@ struct JediModel
 namespace TFE_Model_Jedi
 {
 	JediModel* get(const char* name, AssetPool pool = POOL_LEVEL);
+	JediModel* registerModel(const char* name, JediModel* model, AssetPool pool = POOL_LEVEL);
+	bool getModelName(JediModel* model, const char** name, AssetPool* pool);
 	const std::vector<JediModel*>& getModelList(AssetPool pool);
 	void freeAll();
 	void freeLevelData();

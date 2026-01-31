@@ -28,6 +28,7 @@
 #include <TFE_Ui/ui.h>
 #include <TFE_Ui/markdown.h>
 #include <TFE_System/tfeMessage.h>
+#include <TFE_Jedi/Renderer/RClassic_GPU/modelGPU.h>
 #include <TFE_System/utf8.h>
 #include <TFE_ExternalData/dfLogics.h>
 #include <TFE_ExternalData/weaponExternal.h>
@@ -3294,7 +3295,37 @@ namespace TFE_FrontEndUI
 		}
 
 		const ColorCorrection colorCorrection = { graphics->brightness, graphics->contrast, graphics->saturation, graphics->gamma };
-		TFE_RenderBackend::setColorCorrection(graphics->colorCorrection, &colorCorrection, bloomChanged);		
+		TFE_RenderBackend::setColorCorrection(graphics->colorCorrection, &colorCorrection, bloomChanged);
+
+		//////////////////////////////////////////////////////
+		// Voxel Debug
+		//////////////////////////////////////////////////////
+		ImGui::PushFont(s_dialogFont);
+		ImGui::LabelText("##ConfigLabel", "Voxel Debug");
+		ImGui::PopFont();
+
+		ImGui::Checkbox("Disable Backface Culling", &TFE_VoxDbg::noCull);
+		ImGui::Checkbox("Disable Portal Clipping", &TFE_VoxDbg::noPortalClip);
+
+		ImGui::Separator();
+		ImGui::Text("Weapon Offset");
+		ImGui::SetNextItemWidth(196 * s_uiScale);
+		ImGui::SliderFloat("Right##vox", &TFE_VoxDbg::wpnOffX, -5.0f, 5.0f);
+		ImGui::SetNextItemWidth(196 * s_uiScale);
+		ImGui::SliderFloat("Down##vox", &TFE_VoxDbg::wpnOffY, -5.0f, 5.0f);
+		ImGui::SetNextItemWidth(196 * s_uiScale);
+		ImGui::SliderFloat("Forward##vox", &TFE_VoxDbg::wpnOffZ, -5.0f, 10.0f);
+
+		ImGui::Separator();
+		ImGui::Text("Weapon Orientation");
+		ImGui::SetNextItemWidth(196 * s_uiScale);
+		ImGui::SliderFloat("Yaw Offset##vox", &TFE_VoxDbg::wpnYawOff, 0.0f, 360.0f);
+		ImGui::SetNextItemWidth(196 * s_uiScale);
+		ImGui::SliderFloat("Pitch Scale##vox", &TFE_VoxDbg::wpnPitchScale, -2.0f, 2.0f);
+		ImGui::SetNextItemWidth(196 * s_uiScale);
+		ImGui::SliderFloat("Fwd Pitch Scale##vox", &TFE_VoxDbg::wpnFwdPitchScale, -1.0f, 1.0f);
+		ImGui::SetNextItemWidth(196 * s_uiScale);
+		ImGui::SliderFloat("Roll Scale##vox", &TFE_VoxDbg::wpnRollScale, -2.0f, 2.0f);
 	}
 
 	void configHud()

@@ -32,8 +32,12 @@ namespace TFE_Jedi
 		{
 			SecObject* obj0 = *((SecObject**)r0);
 			SecObject* obj1 = *((SecObject**)r1);
+			const bool obj0Is3d = (obj0->type == OBJ_TYPE_3D) || obj0->voxelModel;
+			const bool obj1Is3d = (obj1->type == OBJ_TYPE_3D) || obj1->voxelModel;
+			const JediModel* model0 = obj0->voxelModel ? obj0->voxelModel : obj0->model;
+			const JediModel* model1 = obj1->voxelModel ? obj1->voxelModel : obj1->model;
 
-			if (obj0->type == OBJ_TYPE_3D && obj1->type == OBJ_TYPE_3D)
+			if (obj0Is3d && obj1Is3d && model0 && model1)
 			{
 				// Both objects are 3D.
 				const fixed16_16 distSq0 = dotFixed(obj0->posVS, obj0->posVS);
@@ -41,26 +45,26 @@ namespace TFE_Jedi
 				const fixed16_16 dist0 = fixedSqrt(distSq0);
 				const fixed16_16 dist1 = fixedSqrt(distSq1);
 
-				if (obj0->model->isBridge && obj1->model->isBridge)
+				if (model0->isBridge && model1->isBridge)
 				{
 					return dist1 - dist0;
 				}
-				else if (obj0->model->isBridge == 1)
+				else if (model0->isBridge == 1)
 				{
 					return -1;
 				}
-				else if (obj1->model->isBridge == 1)
+				else if (model1->isBridge == 1)
 				{
 					return 1;
 				}
 
 				return dist1 - dist0;
 			}
-			else if (obj0->type == OBJ_TYPE_3D && obj0->model->isBridge)
+			else if (obj0Is3d && model0 && model0->isBridge)
 			{
 				return -1;
 			}
-			else if (obj1->type == OBJ_TYPE_3D && obj1->model->isBridge)
+			else if (obj1Is3d && model1 && model1->isBridge)
 			{
 				return 1;
 			}
@@ -88,16 +92,18 @@ namespace TFE_Jedi
 				if (curObj->flags & OBJ_FLAG_NEEDS_TRANSFORM)
 				{
 					const s32 type = curObj->type;
-					if (type == OBJ_TYPE_SPRITE || type == OBJ_TYPE_FRAME)
+					const JediModel* model = curObj->voxelModel ? curObj->voxelModel : curObj->model;
+					if ((type == OBJ_TYPE_SPRITE || type == OBJ_TYPE_FRAME) && !curObj->voxelModel)
 					{
 						if (curObj->posVS.z >= ONE_16)
 						{
 							buffer[drawCount++] = curObj;
 						}
 					}
-					else if (type == OBJ_TYPE_3D)
+					else if (type == OBJ_TYPE_3D || curObj->voxelModel)
 					{
-						const fixed16_16 radius = curObj->model->radius;
+						if (!model) { continue; }
+						const fixed16_16 radius = model->radius;
 						const fixed16_16 zMax = curObj->posVS.z + radius;
 						// Near plane
 						if (zMax < ONE_16) { continue; }
@@ -135,7 +141,7 @@ namespace TFE_Jedi
 			return drawCount;
 		}
 
-		void sprite_drawWax(s32 angle, SecObject* obj)
+		WaxFrame* sprite_getFrameForAngle(s32 angle, SecObject* obj)
 		{
 			// Angles range from [0, 16384), divide by 512 to get 32 even buckets.
 			s32 angleDiff = (angle - obj->yaw) >> 9;
@@ -144,14 +150,21 @@ namespace TFE_Jedi
 			// Get the animation based on the object state.
 			Wax* wax = obj->wax;
 			WaxAnim* anim = WAX_AnimPtr(wax, obj->anim & 0x1f);
-			if (anim)
+			if (!anim) { return nullptr; }
+
+			// Then get the Sequence from the angle difference.
+			WaxView* view = WAX_ViewPtr(wax, anim, 31 - angleDiff);
+			// And finall the frame from the current sequence.
+			return WAX_FramePtr(wax, view, obj->frame & 0x1f);
+		}
+
+		void sprite_drawWax(s32 angle, SecObject* obj)
+		{
+			WaxFrame* frame = sprite_getFrameForAngle(angle, obj);
+			if (frame)
 			{
-				// Then get the Sequence from the angle difference.
-				WaxView* view = WAX_ViewPtr(wax, anim, 31 - angleDiff);
-				// And finall the frame from the current sequence.
-				WaxFrame* frame = WAX_FramePtr(wax, view, obj->frame & 0x1f);
 				// Draw the frame.
-				sprite_drawFrame((u8*)wax, frame, obj);
+				sprite_drawFrame((u8*)obj->wax, frame, obj);
 			}
 		}
 	}
@@ -496,13 +509,31 @@ namespace TFE_Jedi
 				const s32 type = obj->type;
 				if (type == OBJ_TYPE_SPRITE)
 				{
-					TFE_ZONE("Draw WAX");
+					if (obj->voxelModel)
+					{
+						TFE_ZONE("Draw Voxel");
+						SecObject temp = *obj;
+						fixed16_16 dx = s_rcfState.cameraPos.x - obj->posWS.x;
+						fixed16_16 dz = s_rcfState.cameraPos.z - obj->posWS.z;
+						angle14_32 angle = vec2ToAngle(dx, dz);
+						WaxFrame* frame = sprite_getFrameForAngle(angle, obj);
+						if (frame)
+						{
+							temp.posWS.y += frame->offsetY - frame->heightWS;
+						}
+						obj3d_computeTransform(&temp);
+						robj3d_draw(&temp, obj->voxelModel);
+					}
+					else
+					{
+						TFE_ZONE("Draw WAX");
 
-					fixed16_16 dx = s_rcfState.cameraPos.x - obj->posWS.x;
-					fixed16_16 dz = s_rcfState.cameraPos.z - obj->posWS.z;
-					angle14_32 angle = vec2ToAngle(dx, dz);
+						fixed16_16 dx = s_rcfState.cameraPos.x - obj->posWS.x;
+						fixed16_16 dz = s_rcfState.cameraPos.z - obj->posWS.z;
+						angle14_32 angle = vec2ToAngle(dx, dz);
 
-					sprite_drawWax(angle, obj);
+						sprite_drawWax(angle, obj);
+					}
 				}
 				else if (type == OBJ_TYPE_3D)
 				{
@@ -512,9 +543,23 @@ namespace TFE_Jedi
 				}
 				else if (type == OBJ_TYPE_FRAME)
 				{
-					TFE_ZONE("Draw Frame");
+					if (obj->voxelModel)
+					{
+						TFE_ZONE("Draw Voxel");
+						SecObject temp = *obj;
+						if (obj->fme)
+						{
+							temp.posWS.y += obj->fme->offsetY - obj->fme->heightWS;
+						}
+						obj3d_computeTransform(&temp);
+						robj3d_draw(&temp, obj->voxelModel);
+					}
+					else
+					{
+						TFE_ZONE("Draw Frame");
 
-					sprite_drawFrame((u8*)obj->fme, obj->fme, obj);
+						sprite_drawFrame((u8*)obj->fme, obj->fme, obj);
+					}
 				}
 			}
 		}

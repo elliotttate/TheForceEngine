@@ -483,6 +483,63 @@ namespace TFE_Jedi
 		return texture;
 	}
 
+	TextureData* bitmap_createIndexedTexture(const char* name, u16 width, u16 height, const u8* image, AssetPool pool, bool addToCache)
+	{
+		if (!name || !name[0] || width == 0 || height == 0)
+		{
+			return nullptr;
+		}
+
+		TextureTable::iterator iTex = s_textureTable[pool].find(name);
+		if (iTex != s_textureTable[pool].end())
+		{
+			return s_textureList[pool][iTex->second].texture;
+		}
+
+		TextureData* texture = (TextureData*)region_alloc(s_texState.memoryRegion, sizeof(TextureData));
+		memset(texture, 0, sizeof(TextureData));
+
+		texture->width = width;
+		texture->height = height;
+		texture->uvWidth = width;
+		texture->uvHeight = height;
+		texture->flags = 0;
+		texture->logSizeY = (u8)TFE_Math::log2(height);
+		texture->compressed = 0;
+		texture->palIndex = 1;
+		texture->animIndex = -1;
+		texture->frameIdx = -1;
+		texture->animPtr = nullptr;
+		texture->columns = nullptr;
+		texture->dataSize = width * height;
+
+		texture->image = (u8*)region_alloc(s_texState.memoryRegion, texture->dataSize);
+		if (image)
+		{
+			// Copy row-major input into column-major storage.
+			for (u16 y = 0; y < height; y++)
+			{
+				for (u16 x = 0; x < width; x++)
+				{
+					texture->image[x * height + y] = image[y * width + x];
+				}
+			}
+		}
+		else
+		{
+			memset(texture->image, 0, texture->dataSize);
+		}
+
+		if (addToCache)
+		{
+			const s32 index = (s32)s_textureList[pool].size();
+			s_textureList[pool].push_back({ name, texture });
+			s_textureTable[pool][name] = index;
+		}
+
+		return texture;
+	}
+
 	TextureData* bitmap_loadFromMemory(const u8* data, size_t size, u32 decompress)
 	{
 		TextureData* texture = (TextureData*)malloc(sizeof(TextureData));

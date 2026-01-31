@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <cstring>
 
 #include "darkForcesMain.h"
@@ -43,6 +44,7 @@
 #include <TFE_Audio/audioSystem.h>
 #include <TFE_Asset/modelAsset_jedi.h>
 #include <TFE_Asset/spriteAsset_Jedi.h>
+#include <TFE_Asset/voxelAsset.h>
 #include <TFE_Archive/archive.h>
 #include <TFE_Archive/zipArchive.h>
 #include <TFE_Archive/gobMemoryArchive.h>
@@ -1334,6 +1336,24 @@ namespace TFE_DarkForces
 		if (!TFE_Paths::mapSystemPath(path))
 			sprintf(path, "%sMods/TFE/AdjustableHud", programDir);
 		TFE_Paths::addAbsoluteSearchPath(path);
+
+		// Voxel pack search paths (optional).
+		const char* voxelEnv = getenv("TFE_VOXEL_PACK");
+		if (voxelEnv && voxelEnv[0])
+		{
+			TFE_Voxel::addVoxelRootPath(voxelEnv);
+		}
+
+		sprintf(path, "%sMods/Dark-Forces-Voxel-Pack", programData);
+		TFE_Voxel::addVoxelRootPath(path);
+
+		sprintf(path, "%s", "Mods/Dark-Forces-Voxel-Pack");
+		if (!TFE_Paths::mapSystemPath(path))
+			sprintf(path, "%sMods/Dark-Forces-Voxel-Pack", programDir);
+		TFE_Voxel::addVoxelRootPath(path);
+
+		// Repo default location (for local development).
+		TFE_Voxel::addVoxelRootPath("E:/Github/Dark-Forces-Voxel-Pack");
 	}
 
 	bool openGobFiles()

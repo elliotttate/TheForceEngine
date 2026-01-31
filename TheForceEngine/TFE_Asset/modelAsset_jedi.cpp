@@ -4,6 +4,7 @@
 #include <TFE_System/system.h>
 #include <TFE_Settings/settings.h>
 #include <TFE_Asset/assetSystem.h>
+#include <TFE_Asset/voxelAsset.h>
 #include <TFE_FileSystem/filestream.h>
 #include <TFE_FileSystem/paths.h>
 #include <TFE_System/parser.h>
@@ -169,12 +170,72 @@ namespace TFE_Model_Jedi
 
 	bool parseModel(JediModel* model, const char* name, AssetPool pool);
 
+	JediModel* registerModel(const char* name, JediModel* model, AssetPool pool)
+	{
+		if (!name || !name[0] || !model)
+		{
+			return nullptr;
+		}
+
+		ModelMap::iterator iModel = s_models[pool].find(name);
+		if (iModel != s_models[pool].end())
+		{
+			return iModel->second;
+		}
+
+		// If this model is already in the list, just add an alias.
+		const size_t count = s_modelList[pool].size();
+		for (size_t i = 0; i < count; i++)
+		{
+			if (s_modelList[pool][i] == model)
+			{
+				s_models[pool][name] = model;
+				return model;
+			}
+		}
+
+		s_models[pool][name] = model;
+		s_modelList[pool].push_back(model);
+		s_modelNames[pool].push_back(name);
+		return model;
+	}
+
+	bool getModelName(JediModel* model, const char** name, AssetPool* pool)
+	{
+		if (!model || !name)
+		{
+			return false;
+		}
+
+		for (s32 p = 0; p < POOL_COUNT; p++)
+		{
+			const size_t count = s_modelList[p].size();
+			for (size_t i = 0; i < count; i++)
+			{
+				if (s_modelList[p][i] == model)
+				{
+					*name = s_modelNames[p][i].c_str();
+					if (pool) { *pool = AssetPool(p); }
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	JediModel* get(const char* name, AssetPool pool)
 	{
 		ModelMap::iterator iModel = s_models[pool].find(name);
 		if (iModel != s_models[pool].end())
 		{
 			return iModel->second;
+		}
+
+		// Voxel replacement (allows .WAX/.FME/.3DO names to resolve to voxels).
+		JediModel* voxel = TFE_Voxel::getModelForAssetName(name, pool);
+		if (voxel)
+		{
+			return registerModel(name, voxel, pool);
 		}
 
 		// It doesn't exist yet, try to load the model.
@@ -243,10 +304,7 @@ namespace TFE_Model_Jedi
 
 		// TODO (maybe): Cache binary models to disk so they can be
 		// directly loaded, which will reduce load time.
-		s_models[pool][name] = model;
-		s_modelList[pool].push_back(model);
-		s_modelNames[pool].push_back(name);
-		return model;
+		return registerModel(name, model, pool);
 	}
 
 	bool getModelIndex(JediModel* model, s32* index, AssetPool* pool)

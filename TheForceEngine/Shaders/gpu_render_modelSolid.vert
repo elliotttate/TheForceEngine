@@ -65,6 +65,12 @@ void main()
 
 	// Transform from world to view space.
     vec3 vpos = (worldPos - CameraPos) * CameraView;
+	bool skipClip = (PortalInfo.x & 0x80000000u) != 0u;
+	if (skipClip)
+	{
+		// Prevent near-plane artifacts for HUD/overlay models.
+		vpos.z = max(vpos.z, 1.0);
+	}
 	gl_Position = vec4(vpos, 1.0) * CameraProj;
 
 	// UV Coordinates.
@@ -72,15 +78,25 @@ void main()
 
 	// Clipping.
 	uint portalOffset, portalCount;
-	unpackPortalInfo(PortalInfo.x, portalOffset, portalCount);
-	for (int i = 0; i < int(portalCount) && i < 8; i++)
+	unpackPortalInfo(PortalInfo.x & 0x7FFFFFFFu, portalOffset, portalCount);
+	if (!skipClip)
 	{
-		vec4 plane = texelFetch(DrawListPlanes, int(portalOffset) + i);
-		gl_ClipDistance[i] = dot(vec4(worldPos.xyz, 1.0), plane);
+		for (int i = 0; i < int(portalCount) && i < 8; i++)
+		{
+			vec4 plane = texelFetch(DrawListPlanes, int(portalOffset) + i);
+			gl_ClipDistance[i] = dot(vec4(worldPos.xyz, 1.0), plane);
+		}
+		for (int i = int(portalCount); i < 8; i++)
+		{
+			gl_ClipDistance[i] = 1.0;
+		}
 	}
-	for (int i = int(portalCount); i < 8; i++)
+	else
 	{
-		gl_ClipDistance[i] = 1.0;
+		for (int i = 0; i < 8; i++)
+		{
+			gl_ClipDistance[i] = 1.0;
+		}
 	}
 
 	// Lighting

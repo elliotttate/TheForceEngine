@@ -6,6 +6,7 @@
 #include <TFE_Jedi/Serialization/serialization.h>
 #include <TFE_DarkForces/logic.h>
 #include <TFE_DarkForces/generator.h>
+#include <TFE_Asset/voxelAsset.h>
 #include <TFE_Memory/chunkedArray.h>
 #include <TFE_System/system.h>
 #include <cstring>
@@ -103,6 +104,29 @@ namespace TFE_Jedi
 		else if (serialization_getMode() == SMODE_READ)
 		{
 			obj->ptr = nullptr;
+		}
+
+		if (serialization_getMode() == SMODE_READ)
+		{
+			obj->voxelModel = nullptr;
+			if (obj->type == OBJ_TYPE_SPRITE && obj->wax)
+			{
+				const char* name = nullptr;
+				AssetPool pool = POOL_LEVEL;
+				if (TFE_Sprite_Jedi::getWaxName(obj->wax, &name, &pool))
+				{
+					obj->voxelModel = TFE_Voxel::getModelForAssetName(name, pool);
+				}
+			}
+			else if (obj->type == OBJ_TYPE_FRAME && obj->fme)
+			{
+				const char* name = nullptr;
+				AssetPool pool = POOL_LEVEL;
+				if (TFE_Sprite_Jedi::getFrameName(obj->fme, &name, &pool))
+				{
+					obj->voxelModel = TFE_Voxel::getModelForAssetName(name, pool);
+				}
+			}
 		}
 		
 		SERIALIZE(ObjState_InitVersion, obj->frame, 0);

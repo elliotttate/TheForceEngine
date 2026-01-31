@@ -424,6 +424,7 @@ namespace TFE_DarkForces
 				{
 					const char* levelName = agent_getLevelName();
 					// For now always load medium difficulty since it cannot be selected.
+					weapon_resetVoxels();
 					if (level_load(levelName, s_agentData[s_agentId].difficulty))
 					{
 						setScreenBrightness(ONE_16);
@@ -542,7 +543,9 @@ namespace TFE_DarkForces
 			TFE_Jedi::beginRender();
 
 			updateScreensize();
+			weapon_preRender();
 			drawWorld(s_framebuffer, s_playerEye->sector, s_levelColorMap, s_lightSourceRamp);
+			weapon_postRender();
 			weapon_draw(s_framebuffer, (DrawRect*)vfb_getScreenRect(VFB_RECT_UI));
 			handleVisionFx();
 			handlePaletteFx();
@@ -605,7 +608,9 @@ namespace TFE_DarkForces
 					updateScreensize();
 					if (s_playerEye)
 					{
+						weapon_preRender();
 						drawWorld(s_framebuffer, s_playerEye->sector, s_levelColorMap, s_lightSourceRamp);
+						weapon_postRender();
 					}
 					weapon_draw(s_framebuffer, (DrawRect*)vfb_getScreenRect(VFB_RECT_UI));
 					handleVisionFx();

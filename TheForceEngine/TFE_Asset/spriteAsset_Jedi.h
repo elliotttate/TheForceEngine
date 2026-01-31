@@ -121,5 +121,8 @@ namespace TFE_Sprite_Jedi
 	bool getFrameIndex(JediFrame* frame, s32* index, AssetPool* pool);
 	JediFrame* getFrameByIndex(s32 index, AssetPool pool);
 
+	bool getWaxName(JediWax* wax, const char** name, AssetPool* pool);
+	bool getFrameName(JediFrame* frame, const char** name, AssetPool* pool);
+
 	void sprite_serializeSpritesAndFrames(Stream* stream);
 }

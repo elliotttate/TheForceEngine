@@ -777,6 +777,7 @@ echo ^)";
     <ClCompile Include="TFE_Asset\imageAsset.cpp" />
     <ClCompile Include="TFE_Asset\levelList.cpp" />
     <ClCompile Include="TFE_Asset\modelAsset_jedi.cpp" />
+    <ClCompile Include="TFE_Asset\voxelAsset.cpp" />
     <ClCompile Include="TFE_Asset\paletteAsset.cpp" />
     <ClCompile Include="TFE_Asset\spriteAsset_Jedi.cpp" />
     <ClCompile Include="TFE_Asset\textureAsset.cpp" />

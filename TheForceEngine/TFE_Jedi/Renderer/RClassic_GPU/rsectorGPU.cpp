@@ -1574,6 +1574,23 @@ namespace TFE_Jedi
 			sprdisplayList_addFrame(&drawFrame);
 		}
 	}
+
+	static WaxFrame* sprite_getFrameForAngle(SecObject* obj, angle14_16 angle)
+	{
+		// Angles range from [0, 16384), divide by 512 to get 32 even buckets.
+		s32 angleDiff = (angle - obj->yaw) >> 9;
+		angleDiff &= 31;	// up to 32 views
+
+		// Get the animation based on the object state.
+		Wax* wax = obj->wax;
+		WaxAnim* anim = WAX_AnimPtr(wax, obj->anim & 31);
+		if (!anim) { return nullptr; }
+
+		// Then get the Sequence from the angle difference.
+		WaxView* view = WAX_ViewPtr(wax, anim, 31 - angleDiff);
+		// And finally the frame from the current sequence.
+		return WAX_FramePtr(wax, view, obj->frame & 31);
+	}
 		
 	void addSectorObjects(RSector* curSector, RSector* prevSector, s32 portalId, s32 prevPortalId)
 	{
@@ -1634,11 +1651,34 @@ namespace TFE_Jedi
 
 			if ((obj->flags & OBJ_FLAG_NEEDS_TRANSFORM) && obj->ptr)
 			{
+				const u32 objPortalInfo = (obj->flags & OBJ_FLAG_NO_PORTAL_CLIP) ? 0x80000000u : portalInfo;
 				const s32 type = obj->type;
 				Vec3f posWS = { fixed16ToFloat(obj->posWS.x), fixed16ToFloat(obj->posWS.y), fixed16ToFloat(obj->posWS.z) };
 				if (type == OBJ_TYPE_SPRITE || type == OBJ_TYPE_FRAME)
 				{
-					if (type == OBJ_TYPE_SPRITE)
+					if (obj->voxelModel)
+					{
+						Vec3f voxelPos = posWS;
+						if (type == OBJ_TYPE_SPRITE)
+						{
+							f32 dx = s_cameraPos.x - posWS.x;
+							f32 dz = s_cameraPos.z - posWS.z;
+							angle14_16 angle = vec2ToAngle(dx, dz);
+							WaxFrame* frame = sprite_getFrameForAngle(obj, angle);
+							if (frame)
+							{
+								voxelPos.y += fixed16ToFloat(frame->offsetY - frame->heightWS);
+							}
+						}
+						else if (obj->fme)
+						{
+							voxelPos.y += fixed16ToFloat(obj->fme->offsetY - obj->fme->heightWS);
+						}
+
+						obj3d_computeTransform(obj);
+						model_add(obj, obj->voxelModel, voxelPos, obj->transform, ambient, floorOffset, ceilOffset, objPortalInfo);
+					}
+					else if (type == OBJ_TYPE_SPRITE)
 					{
 						f32 dx = s_cameraPos.x - posWS.x;
 						f32 dz = s_cameraPos.z - posWS.z;
@@ -1657,17 +1697,17 @@ namespace TFE_Jedi
 							WaxView* view = WAX_ViewPtr(wax, anim, 31 - angleDiff);
 							// And finally the frame from the current sequence.
 							WaxFrame* frame = WAX_FramePtr(wax, view, obj->frame & 31);
-							clipSpriteToView(curSector, posWS, frame, wax, obj, (obj->flags & OBJ_FLAG_FULLBRIGHT) != 0, portalInfo);
+							clipSpriteToView(curSector, posWS, frame, wax, obj, (obj->flags & OBJ_FLAG_FULLBRIGHT) != 0, objPortalInfo);
 						}
 					}
 					else if (type == OBJ_TYPE_FRAME)
 					{
-						clipSpriteToView(curSector, posWS, obj->fme, obj->fme, obj, (obj->flags & OBJ_FLAG_FULLBRIGHT) != 0, portalInfo);
+						clipSpriteToView(curSector, posWS, obj->fme, obj->fme, obj, (obj->flags & OBJ_FLAG_FULLBRIGHT) != 0, objPortalInfo);
 					}
 				}
 				else if (type == OBJ_TYPE_3D)
 				{
-					model_add(obj, obj->model, posWS, obj->transform, ambient, floorOffset, ceilOffset, portalInfo);
+					model_add(obj, obj->model, posWS, obj->transform, ambient, floorOffset, ceilOffset, objPortalInfo);
 				}
 			}
 		}
@@ -2054,6 +2094,9 @@ namespace TFE_Jedi
 		textureTable->bind(3);
 		objectPortalPlanes_bind(4);
 		model_drawList();
+
+		// Draw overlay models (HUD weapon) on top — depth test disabled.
+		model_drawOverlayList();
 
 		// Cleanup
 		textures->bind(2);

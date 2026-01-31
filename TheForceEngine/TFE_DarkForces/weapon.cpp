@@ -4,16 +4,58 @@
 #include "weaponFireFunc.h"
 #include <TFE_System/system.h>
 #include <TFE_Jedi/Level/rtexture.h>
+#include <TFE_Jedi/Level/robject.h>
+#include <TFE_Jedi/Level/rsector.h>
 #include <TFE_Jedi/InfSystem/message.h>
 #include <TFE_Jedi/Renderer/RClassic_Fixed/rlightingFixed.h>
+#include <TFE_Jedi/Renderer/RClassic_Fixed/robj3d_fixed/robj3dFixed.h>
+#include <TFE_Jedi/Renderer/RClassic_Float/robj3d_float/robj3dFloat.h>
 #include <TFE_Jedi/Renderer/virtualFramebuffer.h>
 #include <TFE_Jedi/Renderer/jediRenderer.h>
 #include <TFE_Jedi/Renderer/screenDraw.h>
 #include <TFE_Jedi/Serialization/serialization.h>
 #include <TFE_ExternalData/weaponExternal.h>
+#include <TFE_Asset/voxelAsset.h>
+#include <TFE_Asset/modelAsset_jedi.h>
+#include <TFE_Jedi/Math/core_math.h>
+#include <TFE_Jedi/Renderer/RClassic_GPU/modelGPU.h>
+#include <TFE_Asset/imageAsset.h>
+#include <TFE_FileSystem/fileutil.h>
+#include "mission.h"
+#include <TFE_FrontEndUI/console.h>
+
+namespace TFE_VoxDbg
+{
+	bool noCull = true;
+	bool noPortalClip = true;
+	f32  wpnOffX = 1.0f;
+	f32  wpnOffY = 1.245f;
+	f32  wpnOffZ = 2.563f;
+	f32  wpnYawOff = 173.924f;
+	f32  wpnPitchScale = 0.1f;
+	f32  wpnFwdPitchScale = 1.0f;
+	f32  wpnRollScale = 0.0f;
+}
 
 namespace TFE_DarkForces
 {
+	static bool s_voxDbgRegistered = false;
+
+	static void voxDbgRegisterCVars()
+	{
+		if (s_voxDbgRegistered) return;
+		s_voxDbgRegistered = true;
+		CVAR_FLOAT(TFE_VoxDbg::wpnOffX,  "v_wpnOffX",  CVFLAG_DO_NOT_SERIALIZE, "Voxel weapon X offset (right).");
+		CVAR_FLOAT(TFE_VoxDbg::wpnOffY,  "v_wpnOffY",  CVFLAG_DO_NOT_SERIALIZE, "Voxel weapon Y offset (down).");
+		CVAR_FLOAT(TFE_VoxDbg::wpnOffZ,  "v_wpnOffZ",  CVFLAG_DO_NOT_SERIALIZE, "Voxel weapon Z offset (forward).");
+		CVAR_FLOAT(TFE_VoxDbg::wpnYawOff, "v_wpnYawOff", CVFLAG_DO_NOT_SERIALIZE, "Voxel weapon yaw offset in degrees.");
+		CVAR_FLOAT(TFE_VoxDbg::wpnPitchScale, "v_wpnPitchScale", CVFLAG_DO_NOT_SERIALIZE, "Voxel weapon pitch multiplier.");
+		CVAR_FLOAT(TFE_VoxDbg::wpnFwdPitchScale, "v_wpnFwdPitchScale", CVFLAG_DO_NOT_SERIALIZE, "Forward offset per unit of pitch.");
+		CVAR_FLOAT(TFE_VoxDbg::wpnRollScale, "v_wpnRollScale", CVFLAG_DO_NOT_SERIALIZE, "Voxel weapon roll multiplier.");
+		CVAR_BOOL(TFE_VoxDbg::noCull,  "v_noCull",   CVFLAG_DO_NOT_SERIALIZE, "Disable backface culling for all models.");
+		CVAR_BOOL(TFE_VoxDbg::noPortalClip, "v_noPortalClip", CVFLAG_DO_NOT_SERIALIZE, "Disable portal clipping for all models.");
+	}
+
 	///////////////////////////////////////////
 	// Internal State
 	///////////////////////////////////////////
@@ -27,6 +69,103 @@ namespace TFE_DarkForces
 	static s32 s_gasMaskYpos;
 	static PlayerWeapon s_playerWeaponList[WPN_COUNT];
 			
+	// Voxel HUD weapon models.
+	static JediModel* s_weaponVoxelModels[WPN_COUNT] = {};
+	static bool s_weaponVoxelsLoaded = false;
+
+	static const char* s_weaponVoxelNames[WPN_COUNT] =
+	{
+		nullptr,       // WPN_FIST
+		"IPISTOL",     // WPN_PISTOL (bryar)
+		"IAUTOGUN",    // WPN_RIFLE
+		"IDETS",       // WPN_THERMAL_DET
+		"IST-GUNU",    // WPN_REPEATER
+		"IFUSION",     // WPN_FUSION
+		"IMORTAR",     // WPN_MORTAR
+		"IMINE",       // WPN_MINE
+		"ICONCUS",     // WPN_CONCUSSION
+		"ICANNON",     // WPN_CANNON
+	};
+
+	static bool s_weaponVoxelGpuDirty = false;
+	static bool s_weaponSpritesDumped = false;
+
+	static const char* s_weaponIdNames[WPN_COUNT] = {
+		"FIST", "PISTOL", "RIFLE", "THERMAL_DET", "REPEATER",
+		"FUSION", "MORTAR", "MINE", "CONCUSSION", "CANNON"
+	};
+
+	static void dumpWeaponSprites()
+	{
+		if (s_weaponSpritesDumped) { return; }
+		s_weaponSpritesDumped = true;
+
+		FileUtil::makeDirectory("weapon_sprites");
+
+		const u8* pal = s_levelPalette;
+		for (s32 w = 0; w < WPN_COUNT; w++)
+		{
+			PlayerWeapon& wpn = s_playerWeaponList[w];
+			for (s32 f = 0; f < wpn.frameCount; f++)
+			{
+				TextureData* tex = wpn.frames[f];
+				if (!tex || !tex->image) { continue; }
+
+				const u32 width = tex->width;
+				const u32 height = tex->height;
+				u32* rgba = (u32*)malloc(width * height * 4);
+				if (!rgba) { continue; }
+
+				// BM textures are column-major: image[col * height + row], bottom-up.
+				for (u32 y = 0; y < height; y++)
+				{
+					for (u32 x = 0; x < width; x++)
+					{
+						u8 idx = tex->image[x * height + (height - 1 - y)];
+						u8 r = CONV_6bitTo8bit(pal[idx * 3 + 0]);
+						u8 g = CONV_6bitTo8bit(pal[idx * 3 + 1]);
+						u8 b = CONV_6bitTo8bit(pal[idx * 3 + 2]);
+						u8 a = (idx == 0 && (tex->flags & OPACITY_TRANS)) ? 0 : 255;
+						rgba[y * width + x] = (a << 24) | (b << 16) | (g << 8) | r;
+					}
+				}
+
+				char path[256];
+				snprintf(path, sizeof(path), "weapon_sprites/%s_frame%d.png", s_weaponIdNames[w], f);
+				TFE_Image::writeImage(path, width, height, rgba);
+				free(rgba);
+			}
+		}
+	}
+
+	static void loadWeaponVoxels()
+	{
+		if (s_weaponVoxelsLoaded) { return; }
+		s_weaponVoxelsLoaded = true;
+
+		bool anyLoaded = false;
+		for (s32 i = 0; i < WPN_COUNT; i++)
+		{
+			if (s_weaponVoxelNames[i])
+			{
+				s_weaponVoxelModels[i] = TFE_Voxel::getModelForName(s_weaponVoxelNames[i], POOL_LEVEL);
+				if (s_weaponVoxelModels[i]) { anyLoaded = true; }
+			}
+		}
+		if (anyLoaded) { s_weaponVoxelGpuDirty = true; }
+	}
+
+	// Called when a new level loads so weapon voxels rebuild with the correct palette.
+	void weapon_resetVoxels()
+	{
+		s_weaponVoxelsLoaded = false;
+		s_weaponVoxelGpuDirty = false;
+		for (s32 i = 0; i < WPN_COUNT; i++)
+		{
+			s_weaponVoxelModels[i] = nullptr;
+		}
+	}
+
 	static Tick s_weaponDelayPrimary;
 	static Tick s_weaponDelaySeconary;
 	static s32* s_canFirePrimPtr;
@@ -984,8 +1123,130 @@ namespace TFE_DarkForces
 		task_end;
 	}
 
+	// Voxel HUD weapon: rendered as an overlay (no depth test) so it never clips into world geometry.
+	static SecObject* s_voxelHudObj = nullptr;
+	static RSector* s_voxelHudSector = nullptr;
+
+	void weapon_preRender()
+	{
+		loadWeaponVoxels();
+		dumpWeaponSprites();
+
+		// If we just loaded weapon voxels, the GPU renderer needs to rebuild model data.
+		if (s_weaponVoxelGpuDirty && TFE_Jedi::getSubRenderer() == TSR_CLASSIC_GPU)
+		{
+			TFE_Jedi::model_loadGpuModels();
+			s_weaponVoxelGpuDirty = false;
+		}
+
+		JediModel* voxModel = s_weaponVoxelModels[s_curWeapon];
+		{
+			static bool s_loggedOnce = false;
+			if (voxModel && !s_loggedOnce)
+			{
+				s_loggedOnce = true;
+				FILE* f = fopen("tfe_wpnvox_diag.log", "w");
+				if (f)
+				{
+					fprintf(f, "weapon=%d model=%p\n", s_curWeapon, voxModel);
+					fprintf(f, "  polyCount=%d vertexCount=%d flags=0x%x\n", voxModel->polygonCount, voxModel->vertexCount, voxModel->flags);
+					fprintf(f, "  drawId=%p radius=%d\n", voxModel->drawId, voxModel->radius);
+					fprintf(f, "  textureCount=%d\n", voxModel->textureCount);
+					if (voxModel->polygonCount > 0)
+					{
+						JmPolygon* p = &voxModel->polygons[0];
+						fprintf(f, "  poly[0]: shading=%d color=%d vertexCount=%d texture=%p\n", p->shading, p->color, p->vertexCount, p->texture);
+						fprintf(f, "  poly[0] indices: %d %d %d %d\n", p->indices[0], p->indices[1], p->indices[2], p->indices[3]);
+					}
+					// Sample a few vertex positions
+					for (s32 i = 0; i < std::min(6, voxModel->vertexCount); i++)
+					{
+						fprintf(f, "  vtx[%d]: %d %d %d\n", i, voxModel->vertices[i].x, voxModel->vertices[i].y, voxModel->vertices[i].z);
+					}
+					fclose(f);
+				}
+			}
+		}
+		if (!voxModel || !s_curPlayerWeapon || s_weaponOffAnim || s_externalCameraMode || !s_playerObject)
+		{
+			if (s_voxelHudObj && s_voxelHudSector)
+			{
+				TFE_Jedi::sector_removeObject(s_voxelHudObj);
+				s_voxelHudSector = nullptr;
+			}
+			return;
+		}
+
+		SecObject* player = s_playerObject;
+
+		voxDbgRegisterCVars();
+
+		// Position the weapon using yaw only (no pitch) so it doesn't swing when looking up/down.
+		fixed16_16 mtx[9];
+		weapon_computeMatrix(mtx, 0, -s_eyeYaw);
+
+		// Apply a subtle forward offset when looking down, controlled by CVar.
+		const fixed16_16 pitchFwd = mul16(s_eyePitch, floatToFixed16(TFE_VoxDbg::wpnFwdPitchScale));
+
+		// Local-space offset from CVars: (right, down, forward).
+		vec3_fixed localOffset = {
+			floatToFixed16(TFE_VoxDbg::wpnOffX),
+			floatToFixed16(TFE_VoxDbg::wpnOffY),
+			floatToFixed16(TFE_VoxDbg::wpnOffZ) + pitchFwd
+		};
+		vec3_fixed worldOffset;
+		TFE_Jedi::rotateVectorM3x3(&localOffset, &worldOffset, mtx);
+
+		fixed16_16 posX = s_eyePos.x + worldOffset.x;
+		fixed16_16 posY = s_eyePos.y + worldOffset.y;
+		fixed16_16 posZ = s_eyePos.z + worldOffset.z;
+
+		if (TFE_Jedi::getSubRenderer() == TSR_CLASSIC_GPU)
+		{
+			// GPU path: add directly to the overlay draw list (renders on top of world).
+			if (!s_voxelHudObj)
+			{
+				s_voxelHudObj = TFE_Jedi::allocateObject();
+				if (!s_voxelHudObj) { return; }
+				s_voxelHudObj->type = OBJ_TYPE_3D;
+				s_voxelHudObj->flags = OBJ_FLAG_NEEDS_TRANSFORM;
+				s_voxelHudObj->worldWidth = FIXED(1);
+				s_voxelHudObj->worldHeight = FIXED(1);
+				s_voxelHudObj->entityFlags = 0;
+			}
+			s_voxelHudObj->model = voxModel;
+			s_voxelHudObj->posWS = { posX, posY, posZ };
+			// Yaw offset from CVar (converted from degrees to 14-bit angle: degrees * 16384/360).
+			s_voxelHudObj->yaw = s_eyeYaw + (angle14_32)(TFE_VoxDbg::wpnYawOff * 16384.0f / 360.0f);
+			// Pitch from CVar: scale factor applied to eye pitch.
+			s_voxelHudObj->pitch = (angle14_32)(s_eyePitch * TFE_VoxDbg::wpnPitchScale);
+			s_voxelHudObj->roll = (angle14_32)(s_eyePitch * TFE_VoxDbg::wpnRollScale);
+			TFE_Jedi::obj3d_computeTransform(s_voxelHudObj);
+
+			Vec3f posWS = { fixed16ToFloat(posX), fixed16ToFloat(posY), fixed16ToFloat(posZ) };
+			TFE_Jedi::model_addOverlay(s_voxelHudObj, voxModel, posWS, s_voxelHudObj->transform, 31.0f);
+		}
+		else
+		{
+			// Software renderer: voxel HUD weapon not supported (no overlay pass).
+			// Fall back to the 2D sprite in weapon_draw().
+		}
+	}
+
+	void weapon_postRender()
+	{
+		if (s_voxelHudObj && s_voxelHudSector)
+		{
+			TFE_Jedi::sector_removeObject(s_voxelHudObj);
+			s_voxelHudSector = nullptr;
+		}
+	}
+
 	// In DOS, this was part of drawWorld() - 
 	// for TFE I split it out to limit the amount of game code in the renderer.
+	static FILE* s_weaponDbgLog = nullptr;
+	static int s_weaponDbgCount = 0;
+
 	void weapon_draw(u8* display, DrawRect* rect)
 	{
 		// TFE - don't draw weapon in external camera mode
@@ -994,12 +1255,35 @@ namespace TFE_DarkForces
 			return;
 		}
 
+		if (!s_weaponDbgLog)
+		{
+			s_weaponDbgLog = fopen("E:/Github/TheForceEngine/x64/Release/tfe_weapon_debug.log", "w");
+		}
+		if (s_weaponDbgLog && s_weaponDbgCount < 120)
+		{
+			s_weaponDbgCount++;
+			PlayerWeapon* w = s_curPlayerWeapon;
+			fprintf(s_weaponDbgLog, "frame %d: weapon=%p offAnim=%d extCam=%d", s_weaponDbgCount, (void*)w, (int)s_weaponOffAnim, (int)s_externalCameraMode);
+			if (w) { fprintf(s_weaponDbgLog, " wframe=%d frameCount=%d tex=%p flags=%u", w->frame, w->frameCount, (void*)w->frames[w->frame], w->flags); }
+			fprintf(s_weaponDbgLog, "\n");
+			fflush(s_weaponDbgLog);
+		}
+
 		const fixed16_16 weaponLightingZDist  = FIXED(6);
 		const fixed16_16 gasmaskLightingZDist = FIXED(2);
 
 		PlayerWeapon* weapon = s_curPlayerWeapon;
 		if (weapon && !s_weaponOffAnim)
 		{
+			// TFE: Skip the 2D sprite when the voxel overlay is active (GPU renderer only).
+			JediModel* voxModel = s_weaponVoxelModels[s_curWeapon];
+			TFE_SubRenderer subRenderer = TFE_Jedi::getSubRenderer();
+			if (voxModel && subRenderer == TSR_CLASSIC_GPU)
+			{
+				// Voxel weapon rendered via model_addOverlay in weapon_preRender.
+			}
+			else
+			{
 			s32 x = weapon->xPos[weapon->frame];
 			s32 y = weapon->yPos[weapon->frame];
 			if (weapon->flags & 1)
@@ -1017,18 +1301,18 @@ namespace TFE_DarkForces
 				x += weapon->xOffset;
 				y += weapon->yOffset;
 			}
-			
+
 			const u8* atten = RClassic_Fixed::computeLighting(weaponLightingZDist, 0);
 			TextureData* tex = weapon->frames[weapon->frame];
 			if (weapon->ammo && *weapon->ammo == 0 && (weapon->ammo == &s_playerInfo.ammoDetonator || weapon->ammo == &s_playerInfo.ammoMine))
 			{
 				tex = s_playerWeaponList[WPN_FIST].frames[0];
 			}
-			
+
 			u32 dispWidth, dispHeight;
 			vfb_getResolution(&dispWidth, &dispHeight);
 
-			if (dispWidth == 320 && dispHeight == 200 && TFE_Jedi::getSubRenderer() != TSR_CLASSIC_GPU)
+			if (dispWidth == 320 && dispHeight == 200 && subRenderer != TSR_CLASSIC_GPU)
 			{
 				if (atten && !s_weaponLight)
 				{
@@ -1070,6 +1354,7 @@ namespace TFE_DarkForces
 					blitTextureToScreenScaled(tex, rect, x, y, xScale, yScale, display, JTRUE);
 				}
 			}
+			} // end else (no voxel model)
 		}
 
 		if (s_wearingGasmask)

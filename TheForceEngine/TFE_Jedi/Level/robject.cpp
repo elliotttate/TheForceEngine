@@ -3,6 +3,8 @@
 #include <TFE_Game/igame.h>
 #include <TFE_Jedi/Memory/allocator.h>
 #include <TFE_Jedi/Serialization/serialization.h>
+#include <TFE_Asset/modelAsset_jedi.h>
+#include <TFE_Asset/voxelAsset.h>
 #include <TFE_DarkForces/logic.h>
 #include <TFE_Memory/chunkedArray.h>
 
@@ -23,6 +25,7 @@ namespace TFE_Jedi
 		obj->worldWidth = -1;
 		obj->worldHeight = -1;
 		obj->ptr = nullptr;
+		obj->voxelModel = nullptr;
 		obj->sector = nullptr;
 		obj->logic = nullptr;
 		obj->projectileLogic = nullptr;
@@ -61,6 +64,7 @@ namespace TFE_Jedi
 	void obj3d_setData(SecObject* obj, JediModel* pod)
 	{
 		obj->model = pod;
+		obj->voxelModel = nullptr;
 		obj->type = OBJ_TYPE_3D;
 		obj->flags |= OBJ_FLAG_NEEDS_TRANSFORM;
 		if (obj->worldWidth == -1)	// the initial value.
@@ -70,6 +74,20 @@ namespace TFE_Jedi
 		if (obj->worldHeight == -1)
 		{
 			obj->worldHeight = 0;
+		}
+
+		if (pod && !TFE_Voxel::isVoxelModel(pod))
+		{
+			const char* name = nullptr;
+			AssetPool pool = POOL_LEVEL;
+			if (TFE_Model_Jedi::getModelName(pod, &name, &pool))
+			{
+				JediModel* voxel = TFE_Voxel::getModelForAssetName(name, pool);
+				if (voxel)
+				{
+					obj->model = voxel;
+				}
+			}
 		}
 	}
 		
@@ -81,6 +99,7 @@ namespace TFE_Jedi
 	void spirit_setData(SecObject* obj)
 	{
 		obj->ptr = nullptr;
+		obj->voxelModel = nullptr;
 		obj->type = OBJ_TYPE_SPIRIT;
 		if (obj->worldWidth == -1)
 		{
@@ -116,6 +135,17 @@ namespace TFE_Jedi
 				obj->worldHeight = div16(mul16(data->yScale, height), SPRITE_SCALE_FIXED);
 			}
 		}
+
+		obj->voxelModel = nullptr;
+		if (data)
+		{
+			const char* name = nullptr;
+			AssetPool pool = POOL_LEVEL;
+			if (TFE_Sprite_Jedi::getWaxName(data, &name, &pool))
+			{
+				obj->voxelModel = TFE_Voxel::getModelForAssetName(name, pool);
+			}
+		}
 	}
 
 	void frame_setData(SecObject* obj, WaxFrame* data)
@@ -134,6 +164,17 @@ namespace TFE_Jedi
 		{
 			const fixed16_16 height = intToFixed16(TFE_Jedi::abs(cell->sizeY));
 			obj->worldHeight = div16(height, SPRITE_SCALE_FIXED);
+		}
+
+		obj->voxelModel = nullptr;
+		if (data)
+		{
+			const char* name = nullptr;
+			AssetPool pool = POOL_LEVEL;
+			if (TFE_Sprite_Jedi::getFrameName(data, &name, &pool))
+			{
+				obj->voxelModel = TFE_Voxel::getModelForAssetName(name, pool);
+			}
 		}
 	}
 
