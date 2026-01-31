@@ -1659,22 +1659,6 @@ namespace TFE_Jedi
 					if (obj->voxelModel)
 					{
 						Vec3f voxelPos = posWS;
-						if (type == OBJ_TYPE_SPRITE)
-						{
-							f32 dx = s_cameraPos.x - posWS.x;
-							f32 dz = s_cameraPos.z - posWS.z;
-							angle14_16 angle = vec2ToAngle(dx, dz);
-							WaxFrame* frame = sprite_getFrameForAngle(obj, angle);
-							if (frame)
-							{
-								voxelPos.y += fixed16ToFloat(frame->offsetY - frame->heightWS);
-							}
-						}
-						else if (obj->fme)
-						{
-							voxelPos.y += fixed16ToFloat(obj->fme->offsetY - obj->fme->heightWS);
-						}
-
 						obj3d_computeTransform(obj);
 						model_add(obj, obj->voxelModel, voxelPos, obj->transform, ambient, floorOffset, ceilOffset, objPortalInfo);
 					}

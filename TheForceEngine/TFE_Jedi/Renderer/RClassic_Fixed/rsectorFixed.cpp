@@ -519,7 +519,7 @@ namespace TFE_Jedi
 						WaxFrame* frame = sprite_getFrameForAngle(angle, obj);
 						if (frame)
 						{
-							temp.posWS.y += frame->offsetY - frame->heightWS;
+							temp.posWS.y += frame->offsetY;
 						}
 						obj3d_computeTransform(&temp);
 						robj3d_draw(&temp, obj->voxelModel);
@@ -549,7 +549,7 @@ namespace TFE_Jedi
 						SecObject temp = *obj;
 						if (obj->fme)
 						{
-							temp.posWS.y += obj->fme->offsetY - obj->fme->heightWS;
+							temp.posWS.y += obj->fme->offsetY;
 						}
 						obj3d_computeTransform(&temp);
 						robj3d_draw(&temp, obj->voxelModel);

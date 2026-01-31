@@ -17,6 +17,7 @@
 #include <TFE_System/system.h>
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -43,6 +44,7 @@ namespace TFE_Voxel
 
 	static std::vector<std::string> s_voxelRoots;
 	static std::unordered_map<std::string, std::string> s_voxelFiles;
+	static std::unordered_map<std::string, f32> s_voxelScales;  // per-model scale from .cfg sidecar files
 	static std::unordered_map<std::string, JediModel*> s_voxelModels[POOL_COUNT];
 	static std::unordered_set<const JediModel*> s_voxelModelSet;
 	static bool s_voxelFilesDirty = true;
@@ -122,6 +124,22 @@ namespace TFE_Voxel
 		return !files.empty();
 	}
 
+	static void parseCfgFile(const std::string& path, const std::string& key)
+	{
+		FILE* f = fopen(path.c_str(), "r");
+		if (!f) { return; }
+		char line[256];
+		while (fgets(line, sizeof(line), f))
+		{
+			f32 val = 0.0f;
+			if (sscanf(line, " scale %f", &val) == 1 && val > 0.0f)
+			{
+				s_voxelScales[key] = val;
+			}
+		}
+		fclose(f);
+	}
+
 	static void scanVoxelDirectory(const std::string& dir)
 	{
 		FileList files;
@@ -137,6 +155,18 @@ namespace TFE_Voxel
 			{
 				s_voxelFiles[key] = dir + file;
 			}
+		}
+
+		// Scan for .cfg sidecar files (e.g., STORMFIN.cfg alongside STORMFIN.vox).
+		FileList cfgFiles;
+		FileUtil::readDirectory(dir.c_str(), "cfg", cfgFiles);
+		for (const std::string& file : cfgFiles)
+		{
+			char name[TFE_MAX_PATH] = {};
+			FileUtil::stripExtension(file.c_str(), name);
+			std::string key = name;
+			toUpperInPlace(key);
+			parseCfgFile(dir + file, key);
 		}
 
 		FileList subdirs;
@@ -155,6 +185,7 @@ namespace TFE_Voxel
 		}
 
 		s_voxelFiles.clear();
+		s_voxelScales.clear();
 		for (const std::string& root : s_voxelRoots)
 		{
 			std::string base = root;
@@ -182,6 +213,87 @@ namespace TFE_Voxel
 		}
 
 		s_voxelFilesDirty = false;
+	}
+
+	// Helper to read a VOX dictionary string.
+	static std::string readVoxString(const u8*& p, const u8* end)
+	{
+		if (p + 4 > end) { p = end; return {}; }
+		u32 len = readU32(p, end);
+		if (p + len > end) { p = end; return {}; }
+		std::string s((const char*)p, len);
+		p += len;
+		return s;
+	}
+
+	// Helper to read a VOX dictionary (DICT).
+	static std::unordered_map<std::string, std::string> readVoxDict(const u8*& p, const u8* end)
+	{
+		std::unordered_map<std::string, std::string> dict;
+		if (p + 4 > end) return dict;
+		u32 count = readU32(p, end);
+		for (u32 i = 0; i < count && p < end; i++)
+		{
+			std::string key = readVoxString(p, end);
+			std::string val = readVoxString(p, end);
+			dict[key] = val;
+		}
+		return dict;
+	}
+
+	struct VoxModelData
+	{
+		std::vector<VoxVoxel> voxels;
+	};
+
+	struct VoxTransformNode
+	{
+		s32 childId = -1;
+		s32 tx = 0, ty = 0, tz = 0;
+	};
+
+	struct VoxShapeNode
+	{
+		s32 modelId = -1;
+	};
+
+	struct VoxGroupNode
+	{
+		std::vector<s32> children;
+	};
+
+	// Recursively accumulate translation through the scene graph.
+	static void resolveTransforms(
+		s32 nodeId, s32 accTx, s32 accTy, s32 accTz,
+		const std::unordered_map<s32, VoxTransformNode>& transforms,
+		const std::unordered_map<s32, VoxShapeNode>& shapes,
+		const std::unordered_map<s32, VoxGroupNode>& groups,
+		std::unordered_map<s32, std::array<s32, 3>>& modelTranslations)
+	{
+		auto tIt = transforms.find(nodeId);
+		if (tIt != transforms.end())
+		{
+			const auto& t = tIt->second;
+			s32 tx = accTx + t.tx;
+			s32 ty = accTy + t.ty;
+			s32 tz = accTz + t.tz;
+			resolveTransforms(t.childId, tx, ty, tz, transforms, shapes, groups, modelTranslations);
+			return;
+		}
+		auto gIt = groups.find(nodeId);
+		if (gIt != groups.end())
+		{
+			for (s32 child : gIt->second.children)
+			{
+				resolveTransforms(child, accTx, accTy, accTz, transforms, shapes, groups, modelTranslations);
+			}
+			return;
+		}
+		auto sIt = shapes.find(nodeId);
+		if (sIt != shapes.end())
+		{
+			modelTranslations[sIt->second.modelId] = { accTx, accTy, accTz };
+		}
 	}
 
 	static bool loadVoxFile(const char* path, VoxData& outData)
@@ -230,6 +342,12 @@ namespace TFE_Voxel
 		outData.palette.resize(256 * 4, 0);
 		bool hasPalette = false;
 
+		// Collect per-model voxel data and scene graph nodes.
+		std::vector<VoxModelData> models;
+		std::unordered_map<s32, VoxTransformNode> transformNodes;
+		std::unordered_map<s32, VoxShapeNode> shapeNodes;
+		std::unordered_map<s32, VoxGroupNode> groupNodes;
+
 		while (ptr + 12 <= childEnd)
 		{
 			memcpy(chunkId, ptr, 4);
@@ -239,17 +357,15 @@ namespace TFE_Voxel
 			const u8* chunkContent = ptr;
 			const u8* chunkEnd = ptr + chunkContentSize;
 
-			if (memcmp(chunkId, "SIZE", 4) == 0 && chunkContent + 12 <= chunkEnd)
+			if (memcmp(chunkId, "SIZE", 4) == 0)
 			{
-				outData.sizeX = (s32)readU32(chunkContent, chunkEnd);
-				outData.sizeY = (s32)readU32(chunkContent, chunkEnd);
-				outData.sizeZ = (s32)readU32(chunkContent, chunkEnd);
+				// SIZE always precedes XYZI; we just note a new model is coming.
 			}
 			else if (memcmp(chunkId, "XYZI", 4) == 0 && chunkContent + 4 <= chunkEnd)
 			{
 				const u32 count = readU32(chunkContent, chunkEnd);
-				outData.voxels.clear();
-				outData.voxels.reserve(count);
+				VoxModelData md;
+				md.voxels.reserve(count);
 				for (u32 i = 0; i < count && (chunkContent + 4) <= chunkEnd; i++)
 				{
 					VoxVoxel voxel = {};
@@ -257,13 +373,65 @@ namespace TFE_Voxel
 					voxel.y = *chunkContent++;
 					voxel.z = *chunkContent++;
 					voxel.color = *chunkContent++;
-					outData.voxels.push_back(voxel);
+					md.voxels.push_back(voxel);
 				}
+				models.push_back(std::move(md));
 			}
 			else if (memcmp(chunkId, "RGBA", 4) == 0 && chunkContent + 256 * 4 <= chunkEnd)
 			{
 				memcpy(outData.palette.data(), chunkContent, 256 * 4);
 				hasPalette = true;
+			}
+			else if (memcmp(chunkId, "nTRN", 4) == 0 && chunkContent + 4 <= chunkEnd)
+			{
+				s32 nodeId = (s32)readU32(chunkContent, chunkEnd);
+				auto attrs = readVoxDict(chunkContent, chunkEnd);
+				s32 childId = (chunkContent + 4 <= chunkEnd) ? (s32)readU32(chunkContent, chunkEnd) : -1;
+				// reserved
+				if (chunkContent + 4 <= chunkEnd) readU32(chunkContent, chunkEnd);
+				// layer id
+				if (chunkContent + 4 <= chunkEnd) readU32(chunkContent, chunkEnd);
+				// num frames
+				s32 numFrames = (chunkContent + 4 <= chunkEnd) ? (s32)readU32(chunkContent, chunkEnd) : 0;
+				VoxTransformNode tn;
+				tn.childId = childId;
+				for (s32 f = 0; f < numFrames && chunkContent < chunkEnd; f++)
+				{
+					auto frameDict = readVoxDict(chunkContent, chunkEnd);
+					if (f == 0)
+					{
+						auto tIt = frameDict.find("_t");
+						if (tIt != frameDict.end())
+						{
+							sscanf(tIt->second.c_str(), "%d %d %d", &tn.tx, &tn.ty, &tn.tz);
+						}
+					}
+				}
+				transformNodes[nodeId] = tn;
+			}
+			else if (memcmp(chunkId, "nSHP", 4) == 0 && chunkContent + 4 <= chunkEnd)
+			{
+				s32 nodeId = (s32)readU32(chunkContent, chunkEnd);
+				auto attrs = readVoxDict(chunkContent, chunkEnd);
+				s32 numModels = (chunkContent + 4 <= chunkEnd) ? (s32)readU32(chunkContent, chunkEnd) : 0;
+				if (numModels > 0 && chunkContent + 4 <= chunkEnd)
+				{
+					VoxShapeNode sn;
+					sn.modelId = (s32)readU32(chunkContent, chunkEnd);
+					shapeNodes[nodeId] = sn;
+				}
+			}
+			else if (memcmp(chunkId, "nGRP", 4) == 0 && chunkContent + 4 <= chunkEnd)
+			{
+				s32 nodeId = (s32)readU32(chunkContent, chunkEnd);
+				auto attrs = readVoxDict(chunkContent, chunkEnd);
+				s32 numChildren = (chunkContent + 4 <= chunkEnd) ? (s32)readU32(chunkContent, chunkEnd) : 0;
+				VoxGroupNode gn;
+				for (s32 c = 0; c < numChildren && chunkContent + 4 <= chunkEnd; c++)
+				{
+					gn.children.push_back((s32)readU32(chunkContent, chunkEnd));
+				}
+				groupNodes[nodeId] = gn;
 			}
 
 			ptr = chunkEnd + chunkChildrenSize;
@@ -271,7 +439,6 @@ namespace TFE_Voxel
 
 		if (!hasPalette)
 		{
-			// Fallback: grayscale palette if the file doesn't include RGBA.
 			for (u32 i = 0; i < 256; i++)
 			{
 				outData.palette[i * 4 + 0] = (u8)i;
@@ -279,6 +446,62 @@ namespace TFE_Voxel
 				outData.palette[i * 4 + 2] = (u8)i;
 				outData.palette[i * 4 + 3] = 255;
 			}
+		}
+
+		// Resolve per-model translations from the scene graph.
+		std::unordered_map<s32, std::array<s32, 3>> modelTranslations;
+		if (!transformNodes.empty())
+		{
+			resolveTransforms(0, 0, 0, 0, transformNodes, shapeNodes, groupNodes, modelTranslations);
+		}
+
+		// Merge all models with their translations. Use s32 coords first, then shift to u8.
+		struct VoxelS32 { s32 x, y, z; u8 color; };
+		std::vector<VoxelS32> allVoxels;
+		for (s32 mi = 0; mi < (s32)models.size(); mi++)
+		{
+			s32 tx = 0, ty = 0, tz = 0;
+			auto tIt = modelTranslations.find(mi);
+			if (tIt != modelTranslations.end())
+			{
+				tx = tIt->second[0];
+				ty = tIt->second[1];
+				tz = tIt->second[2];
+			}
+			for (const VoxVoxel& v : models[mi].voxels)
+			{
+				allVoxels.push_back({ (s32)v.x + tx, (s32)v.y + ty, (s32)v.z + tz, v.color });
+			}
+		}
+
+		if (allVoxels.empty())
+		{
+			return false;
+		}
+
+		// Compute bounding box and shift to non-negative.
+		s32 minX = allVoxels[0].x, minY = allVoxels[0].y, minZ = allVoxels[0].z;
+		s32 maxX = minX, maxY = minY, maxZ = minZ;
+		for (const auto& v : allVoxels)
+		{
+			if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+			if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+			if (v.z < minZ) minZ = v.z; if (v.z > maxZ) maxZ = v.z;
+		}
+
+		outData.sizeX = maxX - minX + 1;
+		outData.sizeY = maxY - minY + 1;
+		outData.sizeZ = maxZ - minZ + 1;
+
+		outData.voxels.reserve(allVoxels.size());
+		for (const auto& v : allVoxels)
+		{
+			VoxVoxel voxel;
+			voxel.x = (u8)(v.x - minX);
+			voxel.y = (u8)(v.y - minY);
+			voxel.z = (u8)(v.z - minZ);
+			voxel.color = v.color;
+			outData.voxels.push_back(voxel);
 		}
 
 		return outData.sizeX > 0 && outData.sizeY > 0 && outData.sizeZ > 0;
@@ -353,6 +576,12 @@ namespace TFE_Voxel
 		}
 	}
 
+	static f32 getVoxelScale(const std::string& key)
+	{
+		auto it = s_voxelScales.find(key);
+		return (it != s_voxelScales.end()) ? it->second : 1.0f;
+	}
+
 	static JediModel* buildVoxelModel(const std::string& key, const VoxData& data, AssetPool pool)
 	{
 		if (data.sizeX <= 0 || data.sizeY <= 0 || data.sizeZ <= 0 || data.voxels.empty())
@@ -415,6 +644,10 @@ namespace TFE_Voxel
 
 		// Voxel axes (MagicaVoxel) are X=right, Y=forward, Z=up.
 		// Dark Forces uses X=right, Y=up, Z=forward, so map: worldX=voxY, worldY=voxZ, worldZ=voxX.
+		const f32 scale = getVoxelScale(key);
+		const fixed16_16 scaleDiv = floatToFixed16(10.0f / scale);  // SPRITE_SCALE_FIXED adjusted by per-model scale
+		if (voxDbgLog()) { fprintf(s_voxDbg, "  buildVoxelModel: key='%s' scale=%f scaleDiv=%d\n", key.c_str(), scale, scaleDiv); fflush(s_voxDbg); }
+
 		const fixed16_16 halfX = div16(intToFixed16(data.sizeY), intToFixed16(2));
 		const fixed16_16 halfZ = div16(intToFixed16(data.sizeX), intToFixed16(2));
 
@@ -457,13 +690,13 @@ namespace TFE_Voxel
 					const bool worldPosY = (z == 0) || (grid[index - data.sizeX * data.sizeY] == 0);
 					const bool worldNegY = (z == data.sizeZ - 1) || (grid[index + data.sizeX * data.sizeY] == 0);
 
-					const fixed16_16 fx0 = div16(intToFixed16(y) - halfX, SPRITE_SCALE_FIXED);
-					const fixed16_16 fx1 = div16(intToFixed16(y + 1) - halfX, SPRITE_SCALE_FIXED);
-					const fixed16_16 fz0 = div16(intToFixed16(x) - halfZ, SPRITE_SCALE_FIXED);
-					const fixed16_16 fz1 = div16(intToFixed16(x + 1) - halfZ, SPRITE_SCALE_FIXED);
+					const fixed16_16 fx0 = div16(intToFixed16(y) - halfX, scaleDiv);
+					const fixed16_16 fx1 = div16(intToFixed16(y + 1) - halfX, scaleDiv);
+					const fixed16_16 fz0 = div16(intToFixed16(x) - halfZ, scaleDiv);
+					const fixed16_16 fz1 = div16(intToFixed16(x + 1) - halfZ, scaleDiv);
 					// Negate Y so the model is right-side up (Dark Forces Y points down).
-					const fixed16_16 fy0 = -div16(intToFixed16(z + 1), SPRITE_SCALE_FIXED);
-					const fixed16_16 fy1 = -div16(intToFixed16(z), SPRITE_SCALE_FIXED);
+					const fixed16_16 fy0 = -div16(intToFixed16(z + 1), scaleDiv);
+					const fixed16_16 fy1 = -div16(intToFixed16(z), scaleDiv);
 
 					vec3 v000 = { fx0, fy0, fz0 };
 					vec3 v100 = { fx1, fy0, fz0 };
