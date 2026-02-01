@@ -16,6 +16,7 @@ namespace TFE_DarkForces
 
 	s32 lmusic_setSequence(s32 newSeq);
 	s32 lmusic_setCuePoint(s32 newCuePoint);
+	s32 lmusic_getCueCount();
 	void lmusic_stop();
 	void lmusic_reset();
 }  // namespace TFE_DarkForces

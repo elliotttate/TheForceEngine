@@ -130,6 +130,20 @@ namespace TFE_DarkForces
 		ImUnloadAll();
 	}
 
+	s32 lmusic_getCueCount()
+	{
+		if (!s_curSeq) { return 0; }
+		s32 count = 0;
+		for (s32 i = 0; i < MAX_CUE_POINTS; i++)
+		{
+			if (s_sequences[s_curSeq - 1][i].name[0])
+			{
+				count++;
+			}
+		}
+		return count;
+	}
+
 	s32 lmusic_setSequence(s32 newSeq)
 	{
 		if (newSeq > SEQUENCE_COUNT || s_curSeq == newSeq) { return s_curSeq; }
@@ -215,8 +229,6 @@ namespace TFE_DarkForces
 					}
 					else if (oldChunk == '1' || (oldMeasure == 0 && newMeasure == 0))
 					{
-						// This is in the original code as a printf
-						LMUSIC_MSG("oc: %d om: %d ", ImGetParam(oldSound, midiChunk), ImGetParam(oldSound, midiMeasure));
 						ImSoundId newSound = ImFindMidi(newTitle);
 						if (oldSound != newSound)
 						{
