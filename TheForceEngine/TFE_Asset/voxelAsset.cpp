@@ -25,6 +25,9 @@
 
 namespace TFE_Voxel
 {
+	// Maximum recursion depth for directory scanning to prevent stack overflow.
+	static const s32 MAX_SCAN_DEPTH = 16;
+
 	struct VoxVoxel
 	{
 		u8 x;
@@ -77,13 +80,6 @@ namespace TFE_Voxel
 		std::string key = base;
 		toUpperInPlace(key);
 		return key;
-	}
-
-	static FILE* s_voxDbg = nullptr;
-	static FILE* voxDbgLog()
-	{
-		if (!s_voxDbg) { s_voxDbg = fopen("E:/Github/TheForceEngine/x64/Release/tfe_voxel_debug.log", "w"); }
-		return s_voxDbg;
 	}
 
 	static void ensureTrailingSlash(std::string& path)
@@ -140,8 +136,14 @@ namespace TFE_Voxel
 		fclose(f);
 	}
 
-	static void scanVoxelDirectory(const std::string& dir)
+	static void scanVoxelDirectory(const std::string& dir, s32 depth = 0)
 	{
+		if (depth >= MAX_SCAN_DEPTH)
+		{
+			TFE_System::logWrite(LOG_WARNING, "Voxel", "Max directory scan depth reached at '%s'.", dir.c_str());
+			return;
+		}
+
 		FileList files;
 		FileUtil::readDirectory(dir.c_str(), "vox", files);
 		for (const std::string& file : files)
@@ -173,7 +175,7 @@ namespace TFE_Voxel
 		FileUtil::readSubdirectories(dir.c_str(), subdirs);
 		for (const std::string& subdir : subdirs)
 		{
-			scanVoxelDirectory(subdir);
+			scanVoxelDirectory(subdir, depth + 1);
 		}
 	}
 
@@ -544,7 +546,7 @@ namespace TFE_Voxel
 	}
 
 	// Match the 3DO polygon normal computation exactly.
-	// Cross product: (v1-v0) × (v2-v0), result stored as v0 + normalized(cross).
+	// Cross product: (v1-v0) x (v2-v0), result stored as v0 + normalized(cross).
 	// Called with (v1, v2, v0) vertex order to match modelAsset_jedi.cpp convention.
 	static void computePolygonNormal(const vec3* v0, const vec3* v1, const vec3* v2, vec3* out)
 	{
@@ -582,6 +584,16 @@ namespace TFE_Voxel
 		return (it != s_voxelScales.end()) ? it->second : 1.0f;
 	}
 
+	// Pack a vertex into a 64-bit key for deduplication: 3 x fixed16_16 values.
+	static u64 vertexKey(const vec3& v)
+	{
+		// Use the lower 21 bits of each component to fit in 64 bits.
+		const u64 kx = (u64)(u32)v.x;
+		const u64 ky = (u64)(u32)v.y;
+		const u64 kz = (u64)(u32)v.z;
+		return (kx) | (ky << 21) | (kz << 42);
+	}
+
 	static JediModel* buildVoxelModel(const std::string& key, const VoxData& data, AssetPool pool)
 	{
 		if (data.sizeX <= 0 || data.sizeY <= 0 || data.sizeZ <= 0 || data.voxels.empty())
@@ -602,7 +614,14 @@ namespace TFE_Voxel
 				dfPalette);
 		}
 
-		const s32 voxelCount = data.sizeX * data.sizeY * data.sizeZ;
+		// Validate grid dimensions to avoid overflow: sizeX * sizeY * sizeZ must fit in s32.
+		const s64 voxelCount64 = (s64)data.sizeX * (s64)data.sizeY * (s64)data.sizeZ;
+		if (voxelCount64 > (s64)INT_MAX || voxelCount64 <= 0)
+		{
+			TFE_System::logWrite(LOG_WARNING, "Voxel", "Voxel grid too large (%dx%dx%d) for '%s'.", data.sizeX, data.sizeY, data.sizeZ, key.c_str());
+			return nullptr;
+		}
+		const s32 voxelCount = (s32)voxelCount64;
 		std::vector<u8> grid(voxelCount, 0);
 		for (const VoxVoxel& voxel : data.voxels)
 		{
@@ -641,32 +660,50 @@ namespace TFE_Voxel
 
 		std::vector<vec3> vertices;
 		std::vector<TempPoly> polys;
+		std::unordered_map<u64, s32> vertexMap;  // vertex deduplication
 
-		// Voxel axes (MagicaVoxel) are X=right, Y=forward, Z=up.
-		// Dark Forces uses X=right, Y=up, Z=forward, so map: worldX=voxY, worldY=voxZ, worldZ=voxX.
+		// Voxel-to-world axis mapping:
+		//   worldX = voxY, worldY = -voxZ (negated, DF Y points down), worldZ = voxX.
+		// halfX/halfZ center the model around the origin in X and Z.
 		const f32 scale = getVoxelScale(key);
-		const fixed16_16 scaleDiv = floatToFixed16(10.0f / scale);  // SPRITE_SCALE_FIXED adjusted by per-model scale
-		if (voxDbgLog()) { fprintf(s_voxDbg, "  buildVoxelModel: key='%s' scale=%f scaleDiv=%d\n", key.c_str(), scale, scaleDiv); fflush(s_voxDbg); }
+		const fixed16_16 scaleDiv = div16(SPRITE_SCALE_FIXED, floatToFixed16(scale));
 
-		const fixed16_16 halfX = div16(intToFixed16(data.sizeY), intToFixed16(2));
-		const fixed16_16 halfZ = div16(intToFixed16(data.sizeX), intToFixed16(2));
+		const fixed16_16 halfX = div16(intToFixed16(data.sizeY), intToFixed16(2));  // worldX extent = voxY
+		const fixed16_16 halfZ = div16(intToFixed16(data.sizeX), intToFixed16(2));  // worldZ extent = voxX
+
+		// Returns the index of the vertex, reusing an existing one if possible.
+		auto getOrAddVertex = [&](const vec3& v) -> s32
+		{
+			const u64 k = vertexKey(v);
+			auto it = vertexMap.find(k);
+			if (it != vertexMap.end())
+			{
+				// Verify it's actually the same vertex (hash collision check).
+				const vec3& existing = vertices[it->second];
+				if (existing.x == v.x && existing.y == v.y && existing.z == v.z)
+				{
+					return it->second;
+				}
+			}
+			const s32 idx = (s32)vertices.size();
+			vertices.push_back(v);
+			vertexMap[k] = idx;
+			return idx;
+		};
 
 		auto addFace = [&](const vec3& v0, const vec3& v1, const vec3& v2, const vec3& v3, u8 color)
 		{
-			const s32 base = (s32)vertices.size();
-			vertices.push_back(v0);
-			vertices.push_back(v1);
-			vertices.push_back(v2);
-			vertices.push_back(v3);
-
 			TempPoly poly = {};
-			poly.indices[0] = base + 0;
-			poly.indices[1] = base + 1;
-			poly.indices[2] = base + 2;
-			poly.indices[3] = base + 3;
+			poly.indices[0] = getOrAddVertex(v0);
+			poly.indices[1] = getOrAddVertex(v1);
+			poly.indices[2] = getOrAddVertex(v2);
+			poly.indices[3] = getOrAddVertex(v3);
 			poly.color = color;
 			polys.push_back(poly);
 		};
+
+		const s32 strideY = data.sizeX;
+		const s32 strideZ = data.sizeX * data.sizeY;
 
 		for (s32 z = 0; z < data.sizeZ; z++)
 		{
@@ -674,21 +711,21 @@ namespace TFE_Voxel
 			{
 				for (s32 x = 0; x < data.sizeX; x++)
 				{
-					const s32 index = x + y * data.sizeX + z * data.sizeX * data.sizeY;
+					const s32 index = x + y * strideY + z * strideZ;
 					const u8 color = grid[index];
 					if (!color)
 					{
 						continue;
 					}
 
-					// Neighbor checks are in voxel space; map to world axes:
-					// worldX = voxY, worldY = -voxZ, worldZ = voxX.
-					const bool worldNegX = (y == 0) || (grid[index - data.sizeX] == 0);
-					const bool worldPosX = (y == data.sizeY - 1) || (grid[index + data.sizeX] == 0);
-					const bool worldNegZ = (x == 0) || (grid[index - 1] == 0);
+					// Neighbor checks in voxel space, mapped to world axes:
+					//   worldX = voxY, worldY = -voxZ, worldZ = voxX.
+					const bool worldNegX = (y == 0)              || (grid[index - strideY] == 0);
+					const bool worldPosX = (y == data.sizeY - 1) || (grid[index + strideY] == 0);
+					const bool worldNegZ = (x == 0)              || (grid[index - 1] == 0);
 					const bool worldPosZ = (x == data.sizeX - 1) || (grid[index + 1] == 0);
-					const bool worldPosY = (z == 0) || (grid[index - data.sizeX * data.sizeY] == 0);
-					const bool worldNegY = (z == data.sizeZ - 1) || (grid[index + data.sizeX * data.sizeY] == 0);
+					const bool worldPosY = (z == 0)              || (grid[index - strideZ] == 0);
+					const bool worldNegY = (z == data.sizeZ - 1) || (grid[index + strideZ] == 0);
 
 					const fixed16_16 fx0 = div16(intToFixed16(y) - halfX, scaleDiv);
 					const fixed16_16 fx1 = div16(intToFixed16(y + 1) - halfX, scaleDiv);
@@ -781,6 +818,7 @@ namespace TFE_Voxel
 		}
 		model->radius = floatToFixed16(sqrtf(maxDistSq));
 
+		TFE_System::logWrite(LOG_MSG, "Voxel", "Built '%s': %d polys, %d verts.", key.c_str(), model->polygonCount, model->vertexCount);
 		return model;
 	}
 
@@ -820,22 +858,22 @@ namespace TFE_Voxel
 
 	void addVoxelRootPath(const char* path)
 	{
-	if (!path || !path[0])
-	{
-		return;
-	}
+		if (!path || !path[0])
+		{
+			return;
+		}
 
-	if (!FileUtil::directoryExits(path))
-	{
-		if (voxDbgLog()) { fprintf(s_voxDbg, "addVoxelRootPath: dir not found: '%s'\n", path); fflush(s_voxDbg); }
-		return;
-	}
+		if (!FileUtil::directoryExits(path))
+		{
+			TFE_System::logWrite(LOG_WARNING, "Voxel", "Root path not found: '%s'.", path);
+			return;
+		}
 
-	std::string fixed = path;
-	std::replace(fixed.begin(), fixed.end(), '\\', '/');
-	s_voxelRoots.push_back(fixed);
-	s_voxelFilesDirty = true;
-	if (voxDbgLog()) { fprintf(s_voxDbg, "addVoxelRootPath: added '%s'\n", fixed.c_str()); fflush(s_voxDbg); }
+		std::string fixed = path;
+		std::replace(fixed.begin(), fixed.end(), '\\', '/');
+		s_voxelRoots.push_back(fixed);
+		s_voxelFilesDirty = true;
+		TFE_System::logWrite(LOG_MSG, "Voxel", "Added root path '%s'.", fixed.c_str());
 	}
 
 	void clearLevelData()
@@ -916,31 +954,24 @@ namespace TFE_Voxel
 		}
 
 		scanVoxelFiles();
-		if (voxDbgLog() && !s_voxelFiles.empty()) { static bool logged = false; if (!logged) { fprintf(s_voxDbg, "scanVoxelFiles: found %d voxel files from %d roots\n", (int)s_voxelFiles.size(), (int)s_voxelRoots.size()); fflush(s_voxDbg); logged = true; } }
 		const std::string* path = findVoxelPath(key);
-	if (!path)
-	{
-		if (voxDbgLog()) { fprintf(s_voxDbg, "getModelForAssetName: asset='%s' key='%s' found=NO\n", assetName, key.c_str()); fflush(s_voxDbg); }
-		return nullptr;
-	}
-	if (voxDbgLog()) { fprintf(s_voxDbg, "getModelForAssetName: asset='%s' key='%s' found=%s\n", assetName, key.c_str(), path->c_str()); fflush(s_voxDbg); }
+		if (!path)
+		{
+			return nullptr;
+		}
 
 		VoxData data;
 		if (!loadVoxFile(path->c_str(), data))
 		{
-			if (voxDbgLog()) { fprintf(s_voxDbg, "  LOAD FAILED for '%s'\n", path->c_str()); fflush(s_voxDbg); }
 			TFE_System::logWrite(LOG_WARNING, "Voxel", "Failed to load '%s'.", path->c_str());
 			return nullptr;
 		}
-		if (voxDbgLog()) { fprintf(s_voxDbg, "  LOADED: size=%dx%dx%d voxels=%d\n", data.sizeX, data.sizeY, data.sizeZ, (int)data.voxels.size()); fflush(s_voxDbg); }
 
 		JediModel* model = buildVoxelModel(key, data, pool);
 		if (!model)
 		{
-			if (voxDbgLog()) { fprintf(s_voxDbg, "  BUILD FAILED for '%s'\n", key.c_str()); fflush(s_voxDbg); }
 			return nullptr;
 		}
-		if (voxDbgLog()) { fprintf(s_voxDbg, "  SUCCESS: model=%p polyCount=%d vertexCount=%d for '%s'\n", (void*)model, model->polygonCount, model->vertexCount, key.c_str()); fflush(s_voxDbg); }
 
 		TFE_Model_Jedi::registerModel(assetName, model, pool);
 		s_voxelModels[pool][key] = model;
