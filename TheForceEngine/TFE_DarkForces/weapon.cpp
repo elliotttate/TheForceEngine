@@ -20,6 +20,8 @@
 #include <TFE_Jedi/Math/core_math.h>
 #include <TFE_Jedi/Renderer/RClassic_GPU/modelGPU.h>
 #include <TFE_Asset/imageAsset.h>
+#include <TFE_Asset/spriteAsset_Jedi.h>
+#include <TFE_Jedi/Renderer/rcommon.h>
 #include <TFE_FileSystem/fileutil.h>
 #include "mission.h"
 #include <TFE_FrontEndUI/console.h>
@@ -89,6 +91,7 @@ namespace TFE_DarkForces
 
 	static bool s_weaponVoxelGpuDirty = false;
 	static bool s_weaponSpritesDumped = false;
+	static bool s_enemySpritesDumped = false;
 
 	static const char* s_weaponIdNames[WPN_COUNT] = {
 		"FIST", "PISTOL", "RIFLE", "THERMAL_DET", "REPEATER",
@@ -134,6 +137,104 @@ namespace TFE_DarkForces
 				snprintf(path, sizeof(path), "weapon_sprites/%s_frame%d.png", s_weaponIdNames[w], f);
 				TFE_Image::writeImage(path, width, height, rgba);
 				free(rgba);
+			}
+		}
+	}
+
+	static void dumpEnemySprites()
+	{
+		if (s_enemySpritesDumped) { return; }
+		s_enemySpritesDumped = true;
+
+		FileUtil::makeDirectory("enemy_sprites");
+
+		const u8* pal = s_levelPalette;
+		const auto& waxList = TFE_Sprite_Jedi::getWaxList(POOL_LEVEL);
+		for (s32 wi = 0; wi < (s32)waxList.size(); wi++)
+		{
+			JediWax* wax = waxList[wi];
+			if (!wax) { continue; }
+
+			const char* waxName = nullptr;
+			AssetPool pool;
+			if (!TFE_Sprite_Jedi::getWaxName(wax, &waxName, &pool) || !waxName)
+			{
+				continue;
+			}
+
+			// Strip extension from name for directory.
+			char baseName[TFE_MAX_PATH] = {};
+			FileUtil::stripExtension(waxName, baseName);
+
+			char dirPath[TFE_MAX_PATH];
+			snprintf(dirPath, sizeof(dirPath), "enemy_sprites/%s", baseName);
+			FileUtil::makeDirectory(dirPath);
+
+			for (s32 a = 0; a < wax->animCount; a++)
+			{
+				WaxAnim* anim = WAX_AnimPtr(wax, a);
+				if (!anim) { continue; }
+
+				for (s32 v = 0; v < WAX_MAX_VIEWS; v++)
+				{
+					WaxView* view = WAX_ViewPtr(wax, anim, v);
+					if (!view) { continue; }
+
+					for (s32 f = 0; f < anim->frameCount; f++)
+					{
+						WaxFrame* frame = WAX_FramePtr(wax, view, f);
+						if (!frame) { continue; }
+						WaxCell* cell = WAX_CellPtr(wax, frame);
+						if (!cell || cell->sizeX <= 0 || cell->sizeY <= 0) { continue; }
+
+						const s32 w = cell->sizeX;
+						const s32 h = cell->sizeY;
+						u32* rgba = (u32*)malloc(w * h * 4);
+						if (!rgba) { continue; }
+						memset(rgba, 0, w * h * 4);
+
+						const u32* columnOffset = (u32*)((u8*)wax + cell->columnOffset);
+						u8 columnWorkBuffer[WAX_DECOMPRESS_SIZE];
+
+						for (s32 x = 0; x < w; x++)
+						{
+							s32 srcX = frame->flip ? (w - 1 - x) : x;
+							u8* column;
+							if (cell->compressed)
+							{
+								const u8* colPtr = (u8*)cell + columnOffset[srcX];
+								TFE_Jedi::sprite_decompressColumn(colPtr, columnWorkBuffer, h);
+								column = columnWorkBuffer;
+							}
+							else
+							{
+								const u8* imageData = (u8*)cell + sizeof(WaxCell);
+								column = (u8*)imageData + columnOffset[srcX];
+							}
+
+							for (s32 y = 0; y < h; y++)
+							{
+								u8 idx = column[y];
+								if (idx == 0)
+								{
+									rgba[y * w + x] = 0;
+								}
+								else
+								{
+									u8 r = CONV_6bitTo8bit(pal[idx * 3 + 0]);
+									u8 g = CONV_6bitTo8bit(pal[idx * 3 + 1]);
+									u8 b = CONV_6bitTo8bit(pal[idx * 3 + 2]);
+									rgba[y * w + x] = (255u << 24) | (b << 16) | (g << 8) | r;
+								}
+							}
+						}
+
+						char path[TFE_MAX_PATH];
+						snprintf(path, sizeof(path), "enemy_sprites/%s/anim%d_view%d_frame%d.png", baseName, a, v, f);
+						TFE_Image::writeImage(path, w, h, rgba);
+						free(rgba);
+					}
+				}
 			}
 		}
 	}
@@ -1131,6 +1232,7 @@ namespace TFE_DarkForces
 	{
 		loadWeaponVoxels();
 		dumpWeaponSprites();
+		dumpEnemySprites();
 
 		// If we just loaded weapon voxels, the GPU renderer needs to rebuild model data.
 		if (s_weaponVoxelGpuDirty && TFE_Jedi::getSubRenderer() == TSR_CLASSIC_GPU)
